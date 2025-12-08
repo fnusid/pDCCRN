@@ -85,7 +85,7 @@ class DCCRN(nn.Module):
         fac = 2 if bidirectional else 1 
 
         #film layer
-        self.film_layer = FilmLayer(D_in = 256, D=256)
+        # self.film_layer = FilmLayer(D_in = 256, D=256)
 
         fix=True
         self.fix = fix
@@ -205,12 +205,12 @@ class DCCRN(nn.Module):
         Option 2: FiLM module
         '''
         #conditioning on film layer
-        if emb is not None:
-            emb = emb.unsqueeze(1).unsqueeze(1)
-            out = self.film_layer(out, emb)
+        # if emb is not None:
+        #     emb = emb.unsqueeze(1).unsqueeze(1)
+        #     out = self.film_layer(out, emb)
         
-        else:
-            raise ValueError("emb is empty")
+        # else:
+        #     raise ValueError("emb is empty")
 
         batch_size, channels, dims, lengths = out.size()
         out = out.permute(3, 0, 1, 2)

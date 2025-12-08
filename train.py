@@ -222,6 +222,43 @@ class E2EpSE(pl.LightningModule):
         '''
         self.metrics.update(out, target_speech)
         return {}
+    
+    def test_step(self, batch, batch_idx):
+        """
+        Compute objective speech-enhancement metrics on the test set.
+        Very similar to validation_step, but logs are under 'test/...'.
+        """
+        mix, source, labels = batch
+
+        # pick a *deterministic* target for evaluation, e.g. speaker 0
+        target_speech = source[:, 0, :]   # [B, T]
+
+        # forward pass
+        out = self.forward(mix)[1]        # [B, T']
+
+        # match lengths
+        min_len = min(out.shape[-1], target_speech.shape[-1])
+        out = out[..., :min_len]
+        target_speech = target_speech[..., :min_len]
+
+        # update SE metrics (PESQ, STOI, SI-SDR, SIG, BAK, OVRL, etc.)
+        self.metrics.update(out, target_speech)
+
+        # if you also want NOISY baseline metrics in the same run and your
+        # SE_metrics class supports it, you could additionally do:
+        # self.metrics.update_noisy(mix[..., :min_len], target_speech)
+
+        return {}
+
+    def on_test_epoch_end(self):
+        m = self.metrics.compute()  # {'PESQ': ..., 'STOI': ..., ...}
+
+        for k, v in m.items():
+            self.log(f"test/{k}", v)
+            print(f"test/{k}: {v}")
+
+        self.metrics.reset()
+
 
     # -----------------------------
     # VALIDATION (end of epoch)
@@ -419,6 +456,7 @@ if __name__ == "__main__":
     #     limit_val_batches=1,
     #     num_sanity_val_steps=0,
     # )
-    trainer.fit(model, datamodule=dm)
-    # trainer.validate(model, datamodule=dm)
+    # trainer.fit(model, datamodule=dm)
+    # trainer.validate(model, datamodule=dm, ckpt_path="/mnt/disks/data/model_ckpts/DCCRN_2sp_noemb_tr360/best-epoch=25-val_separation=0.000.ckpt")
+    trainer.test(model, datamodule=dm, ckpt_path="/mnt/disks/data/model_ckpts/DCCRN_2sp_noemb_tr360/best-epoch=25-val_separation=0.000.ckpt")
     wandb.finish()
