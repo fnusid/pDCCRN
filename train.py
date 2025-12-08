@@ -191,10 +191,18 @@ class E2EpSE(pl.LightningModule):
         randomly_chosen_source = random.randint(0,1) #0, or 1
         if randomly_chosen_source == 0:
             emb_tgt = emb1 #[B, emb_dim]
+            #true
             target_speech = source[:, 0, :]
+            #reversed
+            # emb_tgt = emb2
+
         else:
             emb_tgt = emb2
+            #true
             target_speech = source[:, 1, :] #[B, T]
+            #reversed
+            # emb_tgt = emb1
+
         
         embs = self.dual_emb_model(mix)# [B, 2, emb_dim]
         e1 = embs[:, 0, :]
@@ -313,7 +321,9 @@ class E2EpSE(pl.LightningModule):
 
             cosine1 = cosine(e1, emb_tgt)
             cosine2 = cosine(e2, emb_tgt)
+            #true
             pred_emb = torch.where((cosine1 > cosine2).unsqueeze(-1), e1, e2)
+            
 
             pred = self.model(mix, emb=pred_emb)[1]  # [1, T']
 
@@ -360,7 +370,7 @@ if __name__ == "__main__":
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=8, 
+        batch_size=4, 
         num_workers=20, # Set this to your preference
         num_speakers=2
     )
@@ -389,9 +399,10 @@ if __name__ == "__main__":
     )
 
     trainer = pl.Trainer(
-        strategy="ddp",
-        accelerator="gpu",
-        devices=[0, 1, 2, 3],
+        # strategy="ddp",
+        # accelerator="gpu",
+        # devices=[0, 1, 2, 3],
+        accelerator="cpu",
         max_epochs=350,
         logger=wandb_logger,
         callbacks=[ckpt],
@@ -419,6 +430,7 @@ if __name__ == "__main__":
     #     limit_val_batches=1,
     #     num_sanity_val_steps=0,
     # )
-    trainer.fit(model, datamodule=dm)
+    # trainer.fit(model, datamodule=dm)
     # trainer.validate(model, datamodule=dm)
+    trainer.test(model,datamodule=dm, ckpt_path = "/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360_concat/best-epoch=46-val_separation=0.000.ckpt")
     wandb.finish()

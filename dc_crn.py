@@ -35,6 +35,25 @@ class FilmLayer(nn.Module):
 
         return output.permute(0,3,1,2)
 
+class EmbedConcat(nn.Module):
+    def __init__(self, D_in=256, D=256):
+        super().__init__()
+
+        self.D = D
+
+        self.projector = nn.Linear(2*D_in, D)
+
+    def forward(self, x, emb):
+        """
+        x: (B, D, F, T)
+        embedding: (B, D_in)
+        """
+        x = x.permute(0,2,3,1) #[B, F,T,D]
+        emb_expanded = emb[:, None, None, :].expand(-1, x.size(1), x.size(2), -1)
+        out = torch.cat([x, emb_expanded], dim=-1) #[B,F,T,2D]
+        out = self.projector(out) #[B,F,T,D]
+        return out.permute(0,3,1,2)
+
 class DCCRN(nn.Module):
 
     def __init__(
@@ -85,7 +104,8 @@ class DCCRN(nn.Module):
         fac = 2 if bidirectional else 1 
 
         #film layer
-        self.film_layer = FilmLayer(D_in = 256, D=256)
+        # self.film_layer = FilmLayer(D_in = 256, D=256)
+        self.embed_concat = EmbedConcat(D_in=256, D=256)
 
         fix=True
         self.fix = fix
@@ -206,8 +226,9 @@ class DCCRN(nn.Module):
         '''
         #conditioning on film layer
         if emb is not None:
-            emb = emb.unsqueeze(1).unsqueeze(1)
-            out = self.film_layer(out, emb)
+            # emb = emb.unsqueeze(1).unsqueeze(1)
+            # out = self.film_layer(out, emb)
+            out = self.embed_concat(out, emb)
         
         else:
             raise ValueError("emb is empty")
