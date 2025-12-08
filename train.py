@@ -191,10 +191,18 @@ class E2EpSE(pl.LightningModule):
         randomly_chosen_source = random.randint(0,1) #0, or 1
         if randomly_chosen_source == 0:
             emb_tgt = emb1 #[B, emb_dim]
+            #true
             target_speech = source[:, 0, :]
+            #reversed
+            # emb_tgt = emb2
+
         else:
             emb_tgt = emb2
+            #true
             target_speech = source[:, 1, :] #[B, T]
+            #reversed
+            # emb_tgt = emb1
+
         
         embs = self.dual_emb_model(mix)# [B, 2, emb_dim]
         e1 = embs[:, 0, :]
@@ -313,7 +321,9 @@ class E2EpSE(pl.LightningModule):
 
             cosine1 = cosine(e1, emb_tgt)
             cosine2 = cosine(e2, emb_tgt)
+            #true
             pred_emb = torch.where((cosine1 > cosine2).unsqueeze(-1), e1, e2)
+            
 
             pred = self.model(mix, emb=pred_emb)[1]  # [1, T']
 
@@ -374,10 +384,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="pDCCRN_2sp",
-        name="pDCCRN_2sp_tr360",
+        name="pDCCRN_2sp_tr360_oracle",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360_oracle/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -385,18 +395,19 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360/"
+        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360_oracle/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp",
         accelerator="gpu",
         devices=[0, 1, 2, 3],
-        max_epochs=350,
+        max_epochs=70,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
         enable_checkpointing=True,
+        
     )
 
     # trainer = pl.Trainer(
@@ -420,5 +431,6 @@ if __name__ == "__main__":
     #     num_sanity_val_steps=0,
     # )
     trainer.fit(model, datamodule=dm)
-    # trainer.validate(model, datamodule=dm)
+
+    # trainer.validate(model, datamodule=dm, ckpt_path = "/mnt/disks/data/model_ckpts/archive_ckpt/pFCCRN_2sp/best-epoch=60-val_separation=0.000.ckpt")
     wandb.finish()

@@ -39,7 +39,7 @@ def main():
         sample_rate=sample_rate,
     )
     dm.setup()
-    val_loader: DataLoader = dm.val_dataloader()
+    val_loader: DataLoader = dm.test_dataloader()
 
     # ------------------------
     # 3) Metrics object

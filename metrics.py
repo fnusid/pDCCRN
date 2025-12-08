@@ -30,7 +30,7 @@ class SE_metrics(nn.Module):
 
         self.dnsmos_metric = DeepNoiseSuppressionMeanOpinionScore(
             fs=16000,
-            personalized=True, #turn this thing False for the final metric
+            personalized=False, #turn this thing False for the final metric
             device=self.device,
             num_threads=4,
         )

@@ -48,7 +48,7 @@ class MyLibri2Mix(Dataset):
         self.noise_prob = 0.8
         if split=='train':
             self.noise_file_path = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/noise_files_embedding_model/freesound_noise_bins.json" #[freesound, sound-bible, wham tr]
-        elif split == 'val':
+        elif split == 'val' or split == 'test':
             self.noise_file_path = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/noise_files_embedding_model/wham_tt_noise_bins.json"
 
         with open(self.noise_file_path, 'r') as f:
@@ -205,6 +205,7 @@ class LibriMixDataModule(pl.LightningDataModule):
 
         train_meta = os.path.join(self.metadata_path, "mixture_train-360_mix_clean.csv")
         val_meta = os.path.join(self.metadata_path, "mixture_dev_mix_clean.csv")
+        test_meta = os.path.join(self.metadata_path, "mixture_test_mix_clean.csv")
 
         self.train_dataset = MyLibri2Mix(
             metadata_path=train_meta,
@@ -217,6 +218,12 @@ class LibriMixDataModule(pl.LightningDataModule):
             speaker_map_path=self.speaker_map_path,
             num_speakers=self.num_speakers,
             split='val'
+        )
+        self.test_dataset = MyLibri2Mix(
+            metadata_path=test_meta,
+            speaker_map_path=self.speaker_map_path,
+            num_speakers=self.num_speakers,
+            split='test'
         )
         self.fixed_val_indices = list(range(5))  # first 5 samples
 
