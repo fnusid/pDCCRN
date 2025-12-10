@@ -18,7 +18,7 @@ import sys
 sys.path.append("/home/sidharth./codebase/")
 
 from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
-from wavlm_dual_embedding.model import SpeakerEncoderDualWrapper 
+# from wavlm_dual_embedding.model import SpeakerEncoderDualWrapper 
 import random
 random.seed(42)
 import warnings
@@ -62,7 +62,7 @@ class E2EpSE(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
+        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -70,16 +70,16 @@ class E2EpSE(pl.LightningModule):
             speaker_map = json.load(f)
 
         device="cuda" if torch.cuda.is_available() else "cpu"   
-        #Get the dual-emb model and teacher model
+        # Get the dual-emb model and teacher model
         
-        dual_emb_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
-        dual_emb_ckpt = torch.load(dual_emb_ckpt_path, map_location=device)
-        state = strip_dual_model_weights(dual_emb_ckpt["state_dict"])
-        self.dual_emb_model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
-        self.dual_emb_model.load_state_dict(state, strict=True)
-        self.dual_emb_model.to(device).eval()
-        for param in self.dual_emb_model.parameters():
-            param.requires_grad = False
+        # dual_emb_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
+        # dual_emb_ckpt = torch.load(dual_emb_ckpt_path, map_location=device)
+        # state = strip_dual_model_weights(dual_emb_ckpt["state_dict"])
+        # self.dual_emb_model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
+        # self.dual_emb_model.load_state_dict(state, strict=True)
+        # self.dual_emb_model.to(device).eval()
+        # for param in self.dual_emb_model.parameters():
+        #     param.requires_grad = False
 
         self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
         teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
@@ -141,17 +141,9 @@ class E2EpSE(pl.LightningModule):
             emb_tgt = emb2
             target_speech = source[:, 1, :] #[B, T]
         
-        embs = self.dual_emb_model(mix)# [B, 2, emb_dim]
-        e1 = embs[:, 0, :]
-        e2 = embs[:, 1, :]
-
-        cosine1 = cosine(e1, emb_tgt)
-        cosine2 = cosine(e2, emb_tgt)
-        choose_mask = (cosine1 > cosine2).unsqueeze(-1)   # [B,1]
-        pred_emb = torch.where(choose_mask, e1, e2)
         
         #condition dccrn on pred_emb
-        out = self.forward(mix, emb = pred_emb)[1] #get the wav
+        out = self.forward(mix, emb = emb_tgt)[1] #get the wav
 
         min_len = min(out.shape[-1], target_speech.shape[-1])
         out = out[..., :min_len]
@@ -196,16 +188,9 @@ class E2EpSE(pl.LightningModule):
             emb_tgt = emb2
             target_speech = source[:, 1, :] #[B, T]
         
-        embs = self.dual_emb_model(mix)# [B, 2, emb_dim]
-        e1 = embs[:, 0, :]
-        e2 = embs[:, 1, :]
-
-        cosine1 = cosine(e1, emb_tgt)
-        cosine2 = cosine(e2, emb_tgt)
-        choose_mask = (cosine1 > cosine2).unsqueeze(-1)   # [B,1]
-        pred_emb = torch.where(choose_mask, e1, e2)
+    
         #condition dccrn on pred_emb
-        out = self.forward(mix, emb = pred_emb)[1] #get the wav
+        out = self.forward(mix, emb = emb_tgt)[1] #get the wav
         min_len = min(out.shape[-1], target_speech.shape[-1])
         out = out[..., :min_len]
         target_speech = target_speech[..., :min_len]
@@ -257,16 +242,9 @@ class E2EpSE(pl.LightningModule):
                 emb_tgt = emb1
             else:
                 emb_tgt = emb2
-            embs = self.dual_emb_model(mix)
-            e1 = embs[:, 0, :]
-            e2 = embs[:, 1, :]
+    
 
-            cosine1 = cosine(e1, emb_tgt)
-            cosine2 = cosine(e2, emb_tgt)
-            choose_mask = (cosine1 > cosine2).unsqueeze(-1)
-            pred_emb = torch.where(choose_mask, e1, e2)
-
-            pred = self.forward(mix, emb=pred_emb)[1]
+            pred = self.forward(mix, emb=emb_tgt)[1]
 
         # Match lengths
         min_len = min(pred.shape[-1], tgt.shape[-1])
@@ -306,16 +284,7 @@ class E2EpSE(pl.LightningModule):
             else:
                 emb_tgt = emb2
 
-
-            embs = self.dual_emb_model(mix)
-            e1 = embs[:, 0, :]
-            e2 = embs[:, 1, :]
-
-            cosine1 = cosine(e1, emb_tgt)
-            cosine2 = cosine(e2, emb_tgt)
-            pred_emb = torch.where((cosine1 > cosine2).unsqueeze(-1), e1, e2)
-
-            pred = self.model(mix, emb=pred_emb)[1]  # [1, T']
+            pred = self.model(mix, emb=emb_tgt)[1]  # [1, T']
 
             # trim
             min_len = min(pred.shape[-1], source.shape[-1])
@@ -374,25 +343,25 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="pDCCRN_2sp",
-        name="pDCCRN_2sp_tr360",
+        name="pDCCRN_2sp_oracle_tr360",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_tr360/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
         monitor="train/SI-SNR_loss",
         mode="min",
-        save_top_k=1,
+        save_top_k=-1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360/"
+        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_tr360/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp",
         accelerator="gpu",
         devices=[0, 1, 2, 3],
-        max_epochs=350,
+        max_epochs=100,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
