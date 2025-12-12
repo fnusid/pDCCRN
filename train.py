@@ -388,6 +388,7 @@ if __name__ == "__main__":
     #     limit_val_batches=1,
     #     num_sanity_val_steps=0,
     # )
-    trainer.fit(model, datamodule=dm)
+    # trainer.fit(model, datamodule=dm)
+    # trainer.test(model, datamodule=dm, ckpt_path="/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_tr360/best-epoch=65-val_separation=0.000.ckpt")
     # trainer.validate(model, datamodule=dm)
     wandb.finish()
