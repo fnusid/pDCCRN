@@ -13,17 +13,17 @@ def main():
     # ------------------------
     data_root = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix"
     speaker_map_path = (
-        "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/"
-        "Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+        "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
     )
 
     ckpt_path = (
-        "/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_tr360/best-epoch=65-val_separation=0.000.ckpt"
+        "/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360/"
+        "best-epoch=66-val_separation=0.000.ckpt"
     )
 
     batch_size = 8
     num_workers = 4
-    num_speakers = 2
+    num_speakers = 3
     sample_rate = 16000
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,8 +54,14 @@ def main():
         speaker_map_path=speaker_map_path,
     )
     ckpt = torch.load(ckpt_path, map_location=device)
-    # breakpoint()
-    system.load_state_dict(ckpt["state_dict"], strict=True)
+  
+    state_dict = ckpt["state_dict"]
+    pdccrn_state = {
+        k[len("model."):]: v
+        for k, v in state_dict.items()
+        if k.startswith("model.")
+    }
+    system.model.load_state_dict(pdccrn_state, strict=True)
     system.to(device)
     system.eval()
 

@@ -35,6 +35,25 @@ class FilmLayer(nn.Module):
 
         return output.permute(0,3,1,2)
 
+class EmbedConcat(nn.Module):
+    def __init__(self, D_in=256, D=256):
+        super().__init__()
+
+        self.D = D
+
+        self.projector = nn.Linear(2*D_in, D)
+
+    def forward(self, x, emb):
+        """
+        x: (B, D, F, T)
+        embedding: (B, D_in)
+        """
+        x = x.permute(0,2,3,1) #[B, F,T,D]
+        emb_expanded = emb[:, None, None, :].expand(-1, x.size(1), x.size(2), -1)
+        out = torch.cat([x, emb_expanded], dim=-1) #[B,F,T,2D]
+        out = self.projector(out) #[B,F,T,D]
+        return out.permute(0,3,1,2)
+
 class DCCRN(nn.Module):
 
     def __init__(
@@ -86,6 +105,7 @@ class DCCRN(nn.Module):
 
         #film layer
         self.film_layer = FilmLayer(D_in = 256, D=256)
+        # self.embed_concat = EmbedConcat(D_in=256, D=256)
 
         fix=True
         self.fix = fix
@@ -204,6 +224,7 @@ class DCCRN(nn.Module):
         Option 1: Concat and apply linear layer
         Option 2: FiLM module
         '''
+   
         #conditioning on film layer
         if emb is not None:
             emb = emb.unsqueeze(1).unsqueeze(1)
@@ -211,6 +232,13 @@ class DCCRN(nn.Module):
         
         else:
             raise ValueError("emb is empty")
+        ##concatneation 
+        # if emb is not None:
+        #     # emb = emb.unsqueeze(1).unsqueeze(1)
+        #     out = self.embed_concat(out, emb)
+        
+        # else:
+        #     raise ValueError("emb is empty")
 
         batch_size, channels, dims, lengths = out.size()
         out = out.permute(3, 0, 1, 2)
@@ -367,7 +395,8 @@ if __name__ == '__main__':
     '''
     # DCCRN-CL
     net = DCCRN(rnn_units=256,masking_mode='E',use_clstm=True,kernel_num=[32, 64, 128, 256, 256,256])
+    emb = torch.randn((10,256))
     breakpoint()
-    outputs = net(inputs)[1] #(out_spec, out_wav)
+    outputs = net(inputs, emb=emb)[1] #(out_spec, out_wav)
     loss = net.loss(outputs, labels, loss_mode='SI-SNR')
     print(loss)
