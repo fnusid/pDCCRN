@@ -133,13 +133,15 @@ class E2EpSE(pl.LightningModule):
         #     emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
         #     gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
         
-        randomly_chosen_source = random.randint(0,1) #0, or 1
+        randomly_chosen_source = random.randint(0,2) #0, or 1
         if randomly_chosen_source == 0:
             # emb_tgt = emb1 #[B, emb_dim]
             target_speech = source[:, 0, :]
-        else:
+        elif randomly_chosen_source == 1:
             # emb_tgt = emb2
             target_speech = source[:, 1, :] #[B, T]
+        else:
+            target_speech = source[:, 2, :]
         
         # embs = self.dual_emb_model(mix)# [B, 2, emb_dim]
         # e1 = embs[:, 0, :]
@@ -188,13 +190,15 @@ class E2EpSE(pl.LightningModule):
         #     emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
         #     gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
         
-        randomly_chosen_source = random.randint(0,1) #0, or 1
+        randomly_chosen_source = random.randint(0,2) #0, or 1
         if randomly_chosen_source == 0:
             # emb_tgt = emb1 #[B, emb_dim]
             target_speech = source[:, 0, :]
-        else:
+        elif randomly_chosen_source == 1:
             # emb_tgt = emb2
             target_speech = source[:, 1, :] #[B, T]
+        else:
+            target_speech = source[:, 2, :]
         
         # embs = self.dual_emb_model(mix)# [B, 2, emb_dim]
         # e1 = embs[:, 0, :]
@@ -231,7 +235,15 @@ class E2EpSE(pl.LightningModule):
         mix, source, labels = batch
 
         # pick a *deterministic* target for evaluation, e.g. speaker 0
-        target_speech = source[:, 0, :]   # [B, T]
+        randomly_chosen_source = random.randint(0,2) #0, or 1
+        if randomly_chosen_source == 0:
+            # emb_tgt = emb1 #[B, emb_dim]
+            target_speech = source[:, 0, :]
+        elif randomly_chosen_source == 1:
+            # emb_tgt = emb2
+            target_speech = source[:, 1, :] #[B, T]
+        else:
+            target_speech = source[:, 2, :]
 
         # forward pass
         out = self.forward(mix)[1]        # [B, T']
@@ -391,7 +403,7 @@ class E2EpSE(pl.LightningModule):
 # ---------------------------------------
 if __name__ == "__main__":
     DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
 
     dm = LibriMixDataModule(
@@ -399,7 +411,7 @@ if __name__ == "__main__":
         speaker_map_path=SPEAKER_MAP,
         batch_size=8, 
         num_workers=20, # Set this to your preference
-        num_speakers=2
+        num_speakers=3
     )
 
     model = E2EpSE(
@@ -430,7 +442,8 @@ if __name__ == "__main__":
         accelerator="gpu",
         devices=[0, 1, 2, 3],
         max_epochs=350,
-        logger=wandb_logger,
+        # logger=wandb_logger,
+        logger=None,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
         enable_checkpointing=True,

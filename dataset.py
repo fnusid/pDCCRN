@@ -48,7 +48,7 @@ class MyLibri2Mix(Dataset):
         self.noise_prob = 0.8
         if split=='train':
             self.noise_file_path = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/noise_files_embedding_model/freesound_noise_bins.json" #[freesound, sound-bible, wham tr]
-        elif split == 'val' or split == "test":
+        elif split == 'val' or split == 'test':
             self.noise_file_path = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/noise_files_embedding_model/wham_tt_noise_bins.json"
 
         with open(self.noise_file_path, 'r') as f:
@@ -194,8 +194,10 @@ class LibriMixDataModule(pl.LightningDataModule):
 
         self.persistent_workers = True if self.num_workers > 0 else False
 
-        self.base_data_path = os.path.join(self.data_root, f"Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min") #/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_train-360_mix_clean.csv
-
+        self.base_data_path = os.path.join(self.data_root, f"3sp/Libri3Mix_ovl50to80/wav16k/min") #/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_train-360_mix_clean.csv, change this to the 3speaker set
+        '''
+        /mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min
+        '''
         self.metadata_path = os.path.join(self.base_data_path, "metadata")
 
 
@@ -225,6 +227,7 @@ class LibriMixDataModule(pl.LightningDataModule):
             num_speakers=self.num_speakers,
             split='test'
         )
+
         self.fixed_val_indices = list(range(5))  # first 5 samples
 
     def get_fixed_batch(self):
