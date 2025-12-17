@@ -1,0 +1,16 @@
+{
+  "num_files": 44,
+  "mean_cos_margin": 0.2798208702694286,
+  "mean_delta_OVRL": 0.49907531314509546,
+  "mean_delta_SIG": 0.1073174710616711,
+  "mean_delta_BAK": 1.0726871635607493,
+  "median_delta_OVRL": 0.4663414310900511,
+  "median_delta_SIG": -0.06346156929525848,
+  "median_delta_BAK": 1.0690717916998769,
+  "mean_noisy_OVRL": 2.2578294525767446,
+  "mean_enh_OVRL": 2.7569047657218397,
+  "mean_noisy_SIG": 3.140920570492987,
+  "mean_enh_SIG": 3.2482380415546586,
+  "mean_noisy_BAK": 2.470469462519955,
+  "mean_enh_BAK": 3.5431566260807057
+}
