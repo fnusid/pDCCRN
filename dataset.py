@@ -22,6 +22,7 @@ def mix_noise_with_snr(clean, noise, snr_db):
         noise = noise.mean(0)
     if clean.ndim > 1:
         clean = clean.mean(0)
+
     if len(noise) < len(clean):
         diff = len(clean) - len(noise)
         padded_noise = F.pad(noise, (diff//2, diff - (diff//2)))
@@ -44,7 +45,7 @@ class MyLibri2Mix(Dataset):
         super().__init__()
 
         self.metadata = pd.read_csv(metadata_path)
-   
+        self.add_source_noise = True
         self.noise_prob = 0.8
         if split=='train':
             self.noise_file_path = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/noise_files_embedding_model/freesound_noise_bins.json" #[freesound, sound-bible, wham tr]
@@ -73,6 +74,14 @@ class MyLibri2Mix(Dataset):
         mix_path = row['mixture_path']
 
         mix_audio, _ = torchaudio.load(mix_path)
+
+
+        source_audios = []
+        corrupted_audios = []
+        for i in range(self.num_speakers):
+            s_path = row[f"source_{i+1}_path"]
+            s_audio,_ = torchaudio.load(s_path)
+            source_audios.append(s_audio)
 
         #add noise with a probability
 
@@ -128,13 +137,23 @@ class MyLibri2Mix(Dataset):
 
                 mix_audio = mix_noise_with_snr(mix_audio, noise_audio, snr)
 
-        source_audios = []
-        for i in range(self.num_speakers):
-            s_path = row[f"source_{i+1}_path"]
-            s_audio,_ = torchaudio.load(s_path)
-            source_audios.append(s_audio)
-        
-        sources_tensor = torch.cat(source_audios, dim = 0) #[B,2,T]
+                # add noise to each source as well
+                if self.add_source_noise == True:
+                    for i in range(self.num_speakers):
+                        s_audio = source_audios[i]
+                        s_audio = mix_noise_with_snr(s_audio, noise_audio, snr)
+                        corrupted_audios.append(s_audio)
+                    
+                
+    
+
+        if source_audios[0].ndim > 1:
+            source_audios = [s.mean(0) for s in source_audios]
+        sources_tensor = torch.stack(source_audios, dim = 0) #[B,2,T]
+        if corrupted_audios == []:
+            corrupted_audios = torch.stack(source_audios, dim = 0) #[B,2,T]
+        else:
+            corrupted_audios = torch.stack(corrupted_audios, dim = 0) #[B,2,T]
 
         speaker_indices = []
         for i in range(self.num_speakers):
@@ -149,13 +168,13 @@ class MyLibri2Mix(Dataset):
         
         labels_tensor = torch.tensor(speaker_indices, dtype=torch.long)
 
-        return mix_audio.squeeze(0), sources_tensor, labels_tensor
+        return mix_audio.squeeze(0), sources_tensor, labels_tensor, corrupted_audios
 
 
 
 def librimix_collate(batch):
 
-    mix, source, labels = zip(*batch)
+    mix, source, labels, corrupted_audios = zip(*batch)
     '''
     mix: [B, T]
     source: [B, 2, T]
@@ -170,9 +189,16 @@ def librimix_collate(batch):
 
     sources_padded = sources_padded.permute(0,2,1)
 
+
+    #permute the corrupted_audios to [T, 2]
+    corrupted_audios_permuted = [s.permute(1,0) for s in corrupted_audios]
+    corrupted_audios_padded = pad_sequence(corrupted_audios_permuted, batch_first=True, padding_value = 0.0)
+    corrupted_audios_padded = corrupted_audios_padded.permute(0,2,1)
+
+
     labels = torch.stack(labels)
 
-    return mix_padded, sources_padded, labels
+    return mix_padded, sources_padded, labels, corrupted_audios_padded
 
 
 
@@ -235,7 +261,8 @@ class LibriMixDataModule(pl.LightningDataModule):
         mixes   = [i[0] for i in items]    # list of [T]
         sources = [i[1] for i in items]    # list of [2, T]
         labels  = [i[2] for i in items]
-        return mixes, sources, labels
+        corrupted_audios = [i[3] for i in items]    # list of [2, T]
+        return mixes, sources, labels, corrupted_audios
 
     def train_dataloader(self):
         return DataLoader(

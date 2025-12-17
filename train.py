@@ -125,12 +125,12 @@ class E2EpSE(pl.LightningModule):
           wav: [B, T]
           labels: [B, 2]  (speaker IDs, already mapped to [0..num_classes-1])
         """
-        mix, source, labels = batch
+        mix, source, labels, corrupted_audios = batch
         # emb = self.forward(mix)                    # [B, 2, emb_dim]
         #change here
         with torch.no_grad():
-            emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
-            emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
+            emb1 = self.single_sp_model(corrupted_audios[:, 0, :])  # [B, emb_dim]
+            emb2 = self.single_sp_model(corrupted_audios[:, 1, :])  # [B, emb_dim]
             gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
         
         randomly_chosen_source = random.randint(0,1) #0, or 1
@@ -174,10 +174,10 @@ class E2EpSE(pl.LightningModule):
         The clustering metrics are done in validation_epoch_end
         on the entire validation set.
         """
-        mix, source, labels = batch
+        mix, source, labels, corrupted_audios = batch
         with torch.no_grad():
-            emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
-            emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
+            emb1 = self.single_sp_model(corrupted_audios[:, 0, :])  # [B, emb_dim]
+            emb2 = self.single_sp_model(corrupted_audios[:, 1, :])  # [B, emb_dim]
             gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
         
         randomly_chosen_source = random.randint(0,1) #0, or 1
@@ -221,12 +221,13 @@ class E2EpSE(pl.LightningModule):
         # 2) Log audio samples (5 fixed samples)
         if not hasattr(self, "fixed_val_batch"):
             # Save a fixed batch on first val step
-            mix, src, _ = next(iter(self.trainer.datamodule.val_dataloader()))
-            self.fixed_val_batch = (mix[:5], src[:5])
+            mix, src, _, corrupted_audios = next(iter(self.trainer.datamodule.val_dataloader()))
+            self.fixed_val_batch = (mix[:5], src[:5], corrupted_audios[:5])
 
-        mix, src = self.fixed_val_batch
+        mix, src, corr = self.fixed_val_batch
         mix = mix.to(self.device)
         src = src.to(self.device)
+        corr = corr.to(self.device)
 
         # Determine GT target for logging
         idx = random.randint(0,1)
@@ -236,8 +237,8 @@ class E2EpSE(pl.LightningModule):
         with torch.no_grad():
             # you already have selection logic in training_step
             # but for visualization pick one speaker deterministically
-            emb1 = self.single_sp_model(src[:, 0, :])
-            emb2 = self.single_sp_model(src[:, 1, :])
+            emb1 = self.single_sp_model(corr[:, 0, :])
+            emb2 = self.single_sp_model(corr[:, 1, :])
             if idx == 0:
                 emb_tgt = emb1
             else:
@@ -343,10 +344,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="pDCCRN_2sp",
-        name="pDCCRN_2sp_oracle_tr360",
+        name="pDCCRN_2sp_oracle_corrupted_tr360",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_tr360/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_corrupted_tr360/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -354,13 +355,13 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=-1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_tr360/"
+        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_corrupted_tr360/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp",
         accelerator="gpu",
-        devices=[0, 1, 2, 3],
+        devices=[0,1,2,3],
         max_epochs=100,
         logger=wandb_logger,
         callbacks=[ckpt],
@@ -388,7 +389,7 @@ if __name__ == "__main__":
     #     limit_val_batches=1,
     #     num_sanity_val_steps=0,
     # )
-    # trainer.fit(model, datamodule=dm)
+    trainer.fit(model, datamodule=dm)
     # trainer.test(model, datamodule=dm, ckpt_path="/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_tr360/best-epoch=65-val_separation=0.000.ckpt")
     # trainer.validate(model, datamodule=dm)
     wandb.finish()
