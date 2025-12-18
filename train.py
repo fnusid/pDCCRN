@@ -133,31 +133,62 @@ class E2EpSE(pl.LightningModule):
             emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
             gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
         
-        randomly_chosen_source = random.randint(0,1) #0, or 1
-        if randomly_chosen_source == 0:
-            emb_tgt = emb1 #[B, emb_dim]
-            target_speech = source[:, 0, :]
-        else:
-            emb_tgt = emb2
-            target_speech = source[:, 1, :] #[B, T]
-        
+        #getting both target speech individually
+        #for emb1
+        emb_tgt = emb1 #[B, emb_dim]
+        target_speech = source[:, 0, :]
         embs = self.dual_emb_model(mix)# [B, 2, emb_dim]
         e1 = embs[:, 0, :]
         e2 = embs[:, 1, :]
-
         cosine1 = cosine(e1, emb_tgt)
         cosine2 = cosine(e2, emb_tgt)
         choose_mask = (cosine1 > cosine2).unsqueeze(-1)   # [B,1]
         pred_emb = torch.where(choose_mask, e1, e2)
-        
         #condition dccrn on pred_emb
         out = self.forward(mix, emb = pred_emb)[1] #get the wav
-
         min_len = min(out.shape[-1], target_speech.shape[-1])
         out = out[..., :min_len]
         target_speech = target_speech[..., :min_len]
+        loss1 = self.model.loss(out, target_speech, loss_mode='SI-SNR')
+        #for emb2
+        emb_tgt = emb2 #[B, emb_dim]
+        target_speech = source[:, 1, :]
+        choose_mask = (cosine2 > cosine1).unsqueeze(-1)   # [B,1]
+        pred_emb = torch.where(choose_mask, e2, e1)
+        #condition dccrn on pred_emb
+        out = self.forward(mix, emb = pred_emb)[1] #get the wav
+        min_len = min(out.shape[-1], target_speech.shape[-1])
+        out = out[..., :min_len]
+        target_speech = target_speech[..., :min_len]
+        loss2 = self.model.loss(out, target_speech, loss_mode='SI-SNR')
+        loss = (loss1 + loss2)/2
+
+
+        # randomly_chosen_source = random.randint(0,1) #0, or 1
+        # if randomly_chosen_source == 0:
+        #     emb_tgt = emb1 #[B, emb_dim]
+        #     target_speech = source[:, 0, :]
+        # else:
+        #     emb_tgt = emb2
+        #     target_speech = source[:, 1, :] #[B, T]
         
-        loss = self.model.loss(out, target_speech, loss_mode='SI-SNR')
+        # embs = self.dual_emb_model(mix)# [B, 2, emb_dim]
+        # e1 = embs[:, 0, :]
+        # e2 = embs[:, 1, :]
+
+        # cosine1 = cosine(e1, emb_tgt)
+        # cosine2 = cosine(e2, emb_tgt)
+        # choose_mask = (cosine1 > cosine2).unsqueeze(-1)   # [B,1]
+        # pred_emb = torch.where(choose_mask, e1, e2)
+        
+        # #condition dccrn on pred_emb
+        # out = self.forward(mix, emb = pred_emb)[1] #get the wav
+
+        # min_len = min(out.shape[-1], target_speech.shape[-1])
+        # out = out[..., :min_len]
+        # target_speech = target_speech[..., :min_len]
+        
+        # loss = self.model.loss(out, target_speech, loss_mode='SI-SNR')
 
 
         self.log(
@@ -188,26 +219,11 @@ class E2EpSE(pl.LightningModule):
             emb2 = self.single_sp_model(source[:, 1, :])  # [B, emb_dim]
             gt_embs = torch.stack([emb1, emb2], dim=1)  # [B, 2, emb_dim]
         
-        randomly_chosen_source = random.randint(0,1) #0, or 1
-        if randomly_chosen_source == 0:
-            emb_tgt = emb1 #[B, emb_dim]
-            #true
-            target_speech = source[:, 0, :]
-            #reversed
-            # emb_tgt = emb2
-
-        else:
-            emb_tgt = emb2
-            #true
-            target_speech = source[:, 1, :] #[B, T]
-            #reversed
-            # emb_tgt = emb1
-
-        
+        emb_tgt = emb1 #[B, emb_dim]
+        target_speech = source[:, 0, :]
         embs = self.dual_emb_model(mix)# [B, 2, emb_dim]
         e1 = embs[:, 0, :]
         e2 = embs[:, 1, :]
-
         cosine1 = cosine(e1, emb_tgt)
         cosine2 = cosine(e2, emb_tgt)
         choose_mask = (cosine1 > cosine2).unsqueeze(-1)   # [B,1]
@@ -217,6 +233,19 @@ class E2EpSE(pl.LightningModule):
         min_len = min(out.shape[-1], target_speech.shape[-1])
         out = out[..., :min_len]
         target_speech = target_speech[..., :min_len]
+        self.metrics.update(out, target_speech)
+
+        #for emb2
+        emb_tgt = emb2 #[B, emb_dim]
+        target_speech = source[:, 1, :]
+        choose_mask = (cosine2 > cosine1).unsqueeze(-1)   # [B,1]
+        pred_emb = torch.where(choose_mask, e2, e1)
+        #condition dccrn on pred_emb
+        out = self.forward(mix, emb = pred_emb)[1] #get the wav
+        min_len = min(out.shape[-1], target_speech.shape[-1])
+        out = out[..., :min_len]
+        target_speech = target_speech[..., :min_len]
+        self.metrics.update(out, target_speech)
         #compute validation metrics #PESQ, DNSMOS metrics
 
         '''
@@ -228,7 +257,7 @@ class E2EpSE(pl.LightningModule):
             "BAK": float(torch.tensor(self.BAK).nanmean()),
             "OVRL": float(torch.tensor(self.OVRL).nanmean()),
         '''
-        self.metrics.update(out, target_speech)
+        # self.metrics.update(out, target_speech)
         return {}
 
     # -----------------------------
@@ -245,94 +274,109 @@ class E2EpSE(pl.LightningModule):
         if not hasattr(self, "fixed_val_batch"):
             # Save a fixed batch on first val step
             mix, src, _ = next(iter(self.trainer.datamodule.val_dataloader()))
-            self.fixed_val_batch = (mix[:5], src[:5])
+            self.fixed_val_batch = (mix[:3], src[:3])
 
         mix, src = self.fixed_val_batch
         mix = mix.to(self.device)
         src = src.to(self.device)
 
-        # Determine GT target for logging
-        idx = random.randint(0,1)
-        tgt = src[:, idx, :]   # always log speaker 0 for visualization
-
-        # Run forward pass
         with torch.no_grad():
-            # you already have selection logic in training_step
-            # but for visualization pick one speaker deterministically
-            emb1 = self.single_sp_model(src[:, 0, :])
-            emb2 = self.single_sp_model(src[:, 1, :])
-            if idx == 0:
-                emb_tgt = emb1
-            else:
-                emb_tgt = emb2
-            embs = self.dual_emb_model(mix)
+            # teacher embeddings from clean sources
+            emb1 = self.single_sp_model(src[:, 0, :])  # [B,D]
+            emb2 = self.single_sp_model(src[:, 1, :])  # [B,D]
+
+            # dual embeddings from mixture
+            embs = self.dual_emb_model(mix)            # [B,2,D]
             e1 = embs[:, 0, :]
             e2 = embs[:, 1, :]
 
-            cosine1 = cosine(e1, emb_tgt)
-            cosine2 = cosine(e2, emb_tgt)
-            choose_mask = (cosine1 > cosine2).unsqueeze(-1)
-            pred_emb = torch.where(choose_mask, e1, e2)
+            # --- target 0 ---
+            cosine1_0 = cosine(e1, emb1)
+            cosine2_0 = cosine(e2, emb1)
+            choose0 = (cosine1_0 > cosine2_0).unsqueeze(-1)   # [B,1]
+            pred_emb0 = torch.where(choose0, e1, e2)
+            pred0 = self.forward(mix, emb=pred_emb0)[1]       # [B,T]
 
-            pred = self.forward(mix, emb=pred_emb)[1]
+            # --- target 1 ---
+            cosine1_1 = cosine(e1, emb2)
+            cosine2_1 = cosine(e2, emb2)
+            choose1 = (cosine1_1 > cosine2_1).unsqueeze(-1)   # [B,1]
+            pred_emb1 = torch.where(choose1, e1, e2)
+            pred1 = self.forward(mix, emb=pred_emb1)[1]       # [B,T]
 
-        # Match lengths
-        min_len = min(pred.shape[-1], tgt.shape[-1])
-        pred = pred[..., :min_len]
-        tgt = tgt[..., :min_len]
-        mix = mix[..., :min_len]
+        # GT targets
+        tgt0 = src[:, 0, :]   # [B,T]
+        tgt1 = src[:, 1, :]   # [B,T]
+
+        # Match lengths globally so everything aligns
+        min_len = min(mix.shape[-1], tgt0.shape[-1], tgt1.shape[-1], pred0.shape[-1], pred1.shape[-1])
+        mix  = mix[...,  :min_len]
+        tgt0 = tgt0[..., :min_len]
+        tgt1 = tgt1[..., :min_len]
+        pred0 = pred0[..., :min_len]
+        pred1 = pred1[..., :min_len]
+
+        run = self.logger.experiment
 
         # Log each sample
         for i in range(mix.shape[0]):
-            m_np = mix[i].detach().cpu().numpy().astype("float32")
-            t_np = tgt[i].detach().cpu().numpy().astype("float32")
-            p_np = pred[i].detach().cpu().numpy().astype("float32")
+            m_np  = mix[i].detach().cpu().numpy().astype("float32")
 
-     
-            run = self.logger.experiment
+            t0_np = tgt0[i].detach().cpu().numpy().astype("float32")
+            p0_np = pred0[i].detach().cpu().numpy().astype("float32")
 
-            run.log({f"audio/mix_{i}":  wandb.Audio(m_np, sample_rate=16000)})
-            run.log({f"audio/tgt_{i}":  wandb.Audio(t_np, sample_rate=16000)})
-            run.log({f"audio/pred_{i}": wandb.Audio(p_np, sample_rate=16000)})
+            t1_np = tgt1[i].detach().cpu().numpy().astype("float32")
+            p1_np = pred1[i].detach().cpu().numpy().astype("float32")
+
+            run.log({f"audio/mix_{i}": wandb.Audio(m_np, sample_rate=16000)})
+
+            run.log({f"audio/tgt0_{i}": wandb.Audio(t0_np, sample_rate=16000)})
+            run.log({f"audio/pred0_{i}": wandb.Audio(p0_np, sample_rate=16000)})
+
+            run.log({f"audio/tgt1_{i}": wandb.Audio(t1_np, sample_rate=16000)})
+            run.log({f"audio/pred1_{i}": wandb.Audio(p1_np, sample_rate=16000)})
+
+            # optional: log which mixture embedding got picked for each target
+            run.log({f"sel/pick0_{i}": int(choose0[i].item())})
+            run.log({f"sel/pick1_{i}": int(choose1[i].item())})
+
+    # def get_pred_from_mix(self, mix, source):
+    #     """
+    #     mix:    [1, T]
+    #     source: [1, 2, T]
+    #     """
+    #     with torch.no_grad():
+    #         emb1 = self.single_sp_model(source[:, 0, :])
+    #         emb2 = self.single_sp_model(source[:, 1, :])
+
+    #         # randomly choose one target (for personalization)
+    #         # but use deterministic behavior in validation:
+    #         # emb_tgt = emb1  # always choose source[0] or use both
+    #         idx = random.randint(0,1)
+    #         if idx==0:
+    #             emb_tgt = emb1
+    #         else:
+    #             emb_tgt = emb2
 
 
-    def get_pred_from_mix(self, mix, source):
-        """
-        mix:    [1, T]
-        source: [1, 2, T]
-        """
-        with torch.no_grad():
-            emb1 = self.single_sp_model(source[:, 0, :])
-            emb2 = self.single_sp_model(source[:, 1, :])
+    #         embs = self.dual_emb_model(mix)
+    #         e1 = embs[:, 0, :]
+    #         e2 = embs[:, 1, :]
 
-            # randomly choose one target (for personalization)
-            # but use deterministic behavior in validation:
-            # emb_tgt = emb1  # always choose source[0] or use both
-            idx = random.randint(0,1)
-            if idx==0:
-                emb_tgt = emb1
-            else:
-                emb_tgt = emb2
-
-
-            embs = self.dual_emb_model(mix)
-            e1 = embs[:, 0, :]
-            e2 = embs[:, 1, :]
-
-            cosine1 = cosine(e1, emb_tgt)
-            cosine2 = cosine(e2, emb_tgt)
-            #true
-            pred_emb = torch.where((cosine1 > cosine2).unsqueeze(-1), e1, e2)
+    #         cosine1 = cosine(e1, emb_tgt)
+    #         cosine2 = cosine(e2, emb_tgt)
+    #         #true
+    #         pred_emb = torch.where((cosine1 > cosine2).unsqueeze(-1), e1, e2)
             
 
-            pred = self.model(mix, emb=pred_emb)[1]  # [1, T']
+    #         pred = self.model(mix, emb=pred_emb)[1]  # [1, T']
 
-            # trim
-            min_len = min(pred.shape[-1], source.shape[-1])
-            pred = pred[..., :min_len]
-            tgt = source[:, idx, :min_len]  # or 1 depending on emb_tgt
+    #         # trim
+    #         min_len = min(pred.shape[-1], source.shape[-1])
+    #         pred = pred[..., :min_len]
+    #         tgt = source[:, idx, :min_len]  # or 1 depending on emb_tgt
 
-        return pred, tgt
+    #     return pred, tgt
 
     # -----------------------------
     # OPTIMIZER + SCHEDULER
@@ -384,10 +428,10 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="pDCCRN_2sp",
-        name="pDCCRN_2sp_tr360_oracle",
+        name="pDCCRN_2sp_sep",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360_oracle/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_2sp_sep/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -395,14 +439,14 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360_oracle/"
+        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_2sp_sep/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp",
         accelerator="gpu",
         devices=[0, 1, 2, 3],
-        max_epochs=70,
+        max_epochs=100,
         logger=wandb_logger,
         callbacks=[ckpt],
         gradient_clip_val=5.0,
