@@ -86,7 +86,7 @@ def main():
     # ------------------------
     results = system.metrics.compute()
 
-    print("\n=== PSE (training-style, exact validation_step) on Libri2Mix dev ===")
+    print("\n=== PSE (training-style, exact validation_step, speech separation) on Libri2Mix dev ===")
     for k, v in results.items():
         if isinstance(v, torch.Tensor):
             v = v.item()
