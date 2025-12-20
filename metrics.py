@@ -1,114 +1,195 @@
+# metrics.py
 import torch
 import torch.nn as nn
+
 from torchmetrics.audio import PerceptualEvaluationSpeechQuality
 from torchmetrics.audio import ShortTimeObjectiveIntelligibility
 from torchmetrics.audio import ScaleInvariantSignalDistortionRatio
 from torchmetrics.audio import DeepNoiseSuppressionMeanOpinionScore
 
+EPS = 1e-8
+
+
+def si_snr(est: torch.Tensor, ref: torch.Tensor, eps: float = EPS) -> torch.Tensor:
+    """
+    est, ref: [B, T]
+    returns:  [B]
+    """
+    est = est - est.mean(dim=-1, keepdim=True)
+    ref = ref - ref.mean(dim=-1, keepdim=True)
+
+    ref_energy = (ref * ref).sum(dim=-1, keepdim=True) + eps
+    proj = (est * ref).sum(dim=-1, keepdim=True) * ref / ref_energy
+    noise = est - proj
+    ratio = (proj * proj).sum(dim=-1) / ((noise * noise).sum(dim=-1) + eps)
+    return 10.0 * torch.log10(ratio + eps)
+
+
+def pit_reorder_by_sisnr(pred: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
+    """
+    pred, tgt: [B, C, T]
+    returns: pred_reordered: [B, C, T] matched to tgt using SI-SNR PIT
+    Currently optimized for C=2. For C>2, you can extend similarly.
+    """
+    if pred.ndim != 3 or tgt.ndim != 3:
+        raise RuntimeError(f"Expected [B,C,T], got pred={pred.shape}, tgt={tgt.shape}")
+    if pred.shape != tgt.shape:
+        raise RuntimeError(f"Shape mismatch pred={pred.shape}, tgt={tgt.shape}")
+
+    B, C, T = pred.shape
+    if C != 2:
+        # Keep it simple; extend if you do 3sp separation baselines.
+        return pred
+
+    p0, p1 = pred[:, 0, :], pred[:, 1, :]
+    t0, t1 = tgt[:, 0, :], tgt[:, 1, :]
+
+    s_id   = si_snr(p0, t0) + si_snr(p1, t1)   # [B]
+    s_swap = si_snr(p0, t1) + si_snr(p1, t0)   # [B]
+    pick = (s_id >= s_swap).view(B, 1,)      # [B,1]
+
+    pred0 = torch.where(pick, p0, p1)
+    pred1 = torch.where(pick, p1, p0)
+    return torch.stack([pred0, pred1], dim=1)  # [B,2,T]
+
 
 class SE_metrics(nn.Module):
     """
-    Computes: PESQ, STOI, SI-SDR, DNSMOS(personalized)
-    Accumulates results and returns per-epoch averages.
-    """
-    def __init__(self, fs=16000, device="cpu"):
-        super().__init__()
+    Computes epoch-average metrics for separation/enhancement.
 
+    Expected shapes:
+      pred_audio   : [B, C, T]
+      target_audio : [B, C, T]
+    Optional:
+      mix_audio    : [B, T] or [B,1,T] to compute SI_SDRi.
+
+    Notes:
+      - PESQ/DNSMOS are run on CPU per utterance (slow but correct).
+      - We PIT-match predictions to targets first (for fair metrics).
+      - We store running sums + count (no giant Python lists).
+    """
+    def __init__(self, fs: int = 16000, device: str = "cpu",
+                 use_dnsmos: bool = True, dnsmos_personalized: bool = False, dnsmos_threads: int = 4):
+        super().__init__()
         self.fs = fs
         self.device = device
+        self.use_dnsmos = use_dnsmos
 
-        # --- Initialize metrics ---
-        self.pesq_metric = PerceptualEvaluationSpeechQuality(
-            fs=fs, mode="wb"  # wideband 16k
-        )
-
-        self.stoi_metric = ShortTimeObjectiveIntelligibility(
-            fs=fs, extended=False
-        )
-
+        self.pesq_metric = PerceptualEvaluationSpeechQuality(fs=fs, mode="wb")
+        self.stoi_metric = ShortTimeObjectiveIntelligibility(fs=fs, extended=False)
         self.sisdr_metric = ScaleInvariantSignalDistortionRatio()
 
-        self.dnsmos_metric = DeepNoiseSuppressionMeanOpinionScore(
-            fs=16000,
-            personalized=False, #turn this thing False for the final metric
-            device=self.device,
-            num_threads=4,
-        )
-        # --- storage for epoch ---
+        self.dnsmos_metric = None
+        if use_dnsmos:
+            self.dnsmos_metric = DeepNoiseSuppressionMeanOpinionScore(
+                fs=fs,
+                personalized=dnsmos_personalized,
+                device=device,
+                num_threads=dnsmos_threads,
+            )
+
         self.reset()
 
-    # ------------------------------------------------------------------
     def reset(self):
-        self.pesq_scores = []
-        self.stoi_scores = []
-        self.sisdr_scores = []
-        self.SIG = []
-        self.BAK = []
-        self.OVRL = []
+        self.count = 0
 
-    # ------------------------------------------------------------------
+        self.sum_pesq = 0.0
+        self.sum_stoi = 0.0
+        self.sum_sisdr = 0.0
+        self.sum_sisdr_i = 0.0
+        self.sum_sig = 0.0
+        self.sum_bak = 0.0
+        self.sum_ovrl = 0.0
+
+        self.count_sisdr_i = 0
+        self.count_dnsmos = 0
+
     @torch.no_grad()
-    def update(self, pred_audio, target_audio):
+    def update(self, pred_audio: torch.Tensor, target_audio: torch.Tensor, mix_audio: torch.Tensor | None = None):
         """
-        pred_audio:  [B, T]
-        target_audio:[B, T]
+        pred_audio:   [B,C,T]
+        target_audio: [B,C,T]
+        mix_audio:    [B,T] or [B,1,T] (optional, for SI-SDRi)
         """
+        if pred_audio.ndim != 3 or target_audio.ndim != 3:
+            raise RuntimeError(f"Expected [B,C,T]. Got pred={pred_audio.shape}, tgt={target_audio.shape}")
+        if pred_audio.shape != target_audio.shape:
+            raise RuntimeError(f"pred/tgt mismatch: pred={pred_audio.shape} tgt={target_audio.shape}")
 
-        # Move to CPU for PESQ / DNSMOS
-        pred = pred_audio.detach().cpu()
-        tgt  = target_audio.detach().cpu()
+        # match lengths
+        min_len = min(pred_audio.shape[-1], target_audio.shape[-1])
+        pred_audio = pred_audio[..., :min_len]
+        target_audio = target_audio[..., :min_len]
 
-        B = pred.shape[0]
+        if mix_audio is not None:
+            if mix_audio.ndim == 3:
+                mix_audio = mix_audio.squeeze(1)
+            mix_audio = mix_audio[..., :min_len]
 
+        # PIT reorder
+        pred_audio = pit_reorder_by_sisnr(pred_audio, target_audio)
+        
+        B, C, T = pred_audio.shape
+
+        # run per (utterance, speaker)
         for b in range(B):
-            p = pred[b].unsqueeze(0)
-            t = tgt[b].unsqueeze(0)
+            for c in range(C):
+                p = pred_audio[b, c, :].detach().float().cpu().clamp(-1.0, 1.0).unsqueeze(0)  # [1,T]
+                t = target_audio[b, c, :].detach().float().cpu().clamp(-1.0, 1.0).unsqueeze(0)
 
-            # PESQ
-            try:
-                pesq_val = self.pesq_metric(p, t).item()
-            except Exception:
-                pesq_val = float("nan")
+                # PESQ
+                try:
+                    self.sum_pesq += float(self.pesq_metric(p, t).item())
+                except Exception:
+                    pass
 
-            # STOI
-            try:
-                stoi_val = self.stoi_metric(p, t).item()
-            except Exception:
-                stoi_val = float("nan")
+                # STOI
+                try:
+                    self.sum_stoi += float(self.stoi_metric(p, t).item())
+                except Exception:
+                    pass
 
-            # SI-SDR
-            try:
-                sisdr_val = self.sisdr_metric(p, t).item()
-            except Exception:
-                sisdr_val = float("nan")
+                # SI-SDR
+                try:
+                    s = float(self.sisdr_metric(p, t).item())
+                    self.sum_sisdr += s
+                except Exception:
+                    s = None
 
-            # DNSMOS (ONNX-based)
+                # SI-SDRi
+                if mix_audio is not None and s is not None:
+                    try:
+                        m = mix_audio[b].detach().float().cpu().clamp(-1.0, 1.0).unsqueeze(0)
+                        s_mix = float(self.sisdr_metric(m, t).item())
+                        self.sum_sisdr_i += (s - s_mix)
+                        self.count_sisdr_i += 1
+                    except Exception:
+                        pass
 
-            # dnsmos_val = self.dnsmos_metric(p, t)["ovrl_mos"]
+                # DNSMOS (non-reference; only on predicted)
+                if self.dnsmos_metric is not None:
+                    try:
+                        dns = self.dnsmos_metric(p)  # [p808, sig, bak, ovrl]
+                        self.sum_sig += float(dns[1])
+                        self.sum_bak += float(dns[2])
+                        self.sum_ovrl += float(dns[3])
+                        self.count_dnsmos += 1
+                    except Exception:
+                        pass
 
-            dns_mos_scores = self.dnsmos_metric(p) #[p808_mos, mos_sig, mos_bak, mos_ovr]
-            SIG = dns_mos_scores[1]
-            BAK = dns_mos_scores[2]
-            OVRL = dns_mos_scores[-1]
-                
+                self.count += 1
 
-            # push to buffers
-            self.pesq_scores.append(pesq_val)
-            self.stoi_scores.append(stoi_val)
-            self.sisdr_scores.append(sisdr_val)
-            self.SIG.append(SIG)
-            self.BAK.append(BAK)
-            self.OVRL.append(OVRL)
-            # self.dnsmos_scores.append(dnsmos_val)
-
-    # ------------------------------------------------------------------
     def compute(self):
-        """Return mean of all metrics."""
-        return {
-            "PESQ": float(torch.tensor(self.pesq_scores).nanmean()),
-            "STOI": float(torch.tensor(self.stoi_scores).nanmean()),
-            "SI_SDR": float(torch.tensor(self.sisdr_scores).nanmean()),
-            "SIG": float(torch.tensor(self.SIG).nanmean()),
-            "BAK": float(torch.tensor(self.BAK).nanmean()),
-            "OVRL": float(torch.tensor(self.OVRL).nanmean()),
+        denom = max(self.count, 1)
+        out = {
+            "PESQ": self.sum_pesq / denom,
+            "STOI": self.sum_stoi / denom,
+            "SI_SDR": self.sum_sisdr / denom,
         }
+        if self.count_sisdr_i > 0:
+            out["SI_SDRi"] = self.sum_sisdr_i / self.count_sisdr_i
+        if self.count_dnsmos > 0:
+            out["SIG"] = self.sum_sig / self.count_dnsmos
+            out["BAK"] = self.sum_bak / self.count_dnsmos
+            out["OVRL"] = self.sum_ovrl / self.count_dnsmos
+        return out

@@ -10,79 +10,25 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import LibriMixDataModule       
-from dc_crn import DCCRN 
+# from dc_crn import DCCRN 
+# from ConvTasNet import ConvTasNet
+import torchaudio
+from torchaudio.models import ConvTasNet
+from loss import PITSiSNRLoss
 
 from metrics import SE_metrics
 import wandb
 import sys
-sys.path.append("/home/sidharth./codebase/")
 
-from wavlm_single_embedding.model import SpeakerEncoderWrapper as SingleSpeakerEncoderWrapper
-from wavlm_dual_embedding.model import SpeakerEncoderDualWrapper 
+
 import random
 random.seed(42)
 import warnings
 warnings.filterwarnings("ignore")
 
-def strip_model_prefix(state):
-    new_state = {}
-    for k, v in state.items():
-        if k.startswith("model."):
-            new_state[k[len("model."):]] = v   # remove "model."
-        else:
-            new_state[k] = v
-    return new_state
 
 
-def strip_dual_model_weights(state):
-    new_state = {}
-    for k, v in state.items():
-        if not k.startswith("model."):
-            continue
-        k2 = k.replace("model.", "")
-        if k2.startswith("single_sp_model.") or k2.startswith("arcface_loss."):
-            continue
-        new_state[k2] = v
-    return new_state
 
-def cosine(a, b):
-    """
-    a: [B, D]
-    b: [B, D]
-    returns: [B]
-    """
-    dot = (a * b).sum(dim=-1)                 # [B]
-    an = a.norm(dim=-1) + 1e-8                # [B]
-    bn = b.norm(dim=-1) + 1e-8                # [B]
-    return dot / (an * bn)
-
-
-def assign_embeddings_bijective(e1, e2, emb1, emb2):
-    """
-    e1,e2:   [B,D] mixture-derived (unordered)
-    emb1,2:  [B,D] teacher embeddings for source0/source1 (ordered)
-    Returns:
-      emb_for_0, emb_for_1: [B,D] such that:
-        emb_for_0 corresponds to source[:,0] and emb_for_1 to source[:,1]
-      pick_id: [B] bool, True means (e1->spk0, e2->spk1), else swapped
-      margin:  [B] confidence margin between the two assignments
-    """
-    c11 = cosine(e1, emb1)  # e1 vs spk0
-    c12 = cosine(e1, emb2)  # e1 vs spk1
-    c21 = cosine(e2, emb1)  # e2 vs spk0
-    c22 = cosine(e2, emb2)  # e2 vs spk1
-
-    score_id   = c11 + c22
-    score_swap = c12 + c21
-
-    pick_id = (score_id >= score_swap)          # [B]
-    pick_id_u = pick_id.unsqueeze(-1)           # [B,1]
-
-    emb_for_0 = torch.where(pick_id_u, e1, e2)  # spk0 gets e1 if id else e2
-    emb_for_1 = torch.where(pick_id_u, e2, e1)  # spk1 gets the other
-
-    margin = (score_id - score_swap).abs()      # [B]
-    return emb_for_0, emb_for_1, pick_id, margin
 
 class E2EpSE(pl.LightningModule):
     def __init__(
@@ -100,84 +46,64 @@ class E2EpSE(pl.LightningModule):
         device="cuda" if torch.cuda.is_available() else "cpu"   
         #Get the dual-emb model and teacher model
         
-        dual_emb_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
-        dual_emb_ckpt = torch.load(dual_emb_ckpt_path, map_location=device)
-        state = strip_dual_model_weights(dual_emb_ckpt["state_dict"])
-        self.dual_emb_model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
-        self.dual_emb_model.load_state_dict(state, strict=True)
-        self.dual_emb_model.to(device).eval()
-        for param in self.dual_emb_model.parameters():
-            param.requires_grad = False
+        # dual_emb_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
+        # dual_emb_ckpt = torch.load(dual_emb_ckpt_path, map_location=device)
+        # state = strip_dual_model_weights(dual_emb_ckpt["state_dict"])
+        # self.dual_emb_model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
+        # self.dual_emb_model.load_state_dict(state, strict=True)
+        # self.dual_emb_model.to(device).eval()
+        # for param in self.dual_emb_model.parameters():
+        #     param.requires_grad = False
 
-        self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
-        teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
-        ckpt = torch.load(teacher_ckpt_path, map_location="cpu")
-        state = ckpt["state_dict"]
+        # self.single_sp_model = SingleSpeakerEncoderWrapper(emb_dim=emb_dim)
+        # teacher_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
+        # ckpt = torch.load(teacher_ckpt_path, map_location="cpu")
+        # state = ckpt["state_dict"]
 
-        filtered = {}
-        for k, v in state.items():
-            # only keep model.encoder.* or model.wavlm.*, model.projector.*, model.pooling.*
-            if k.startswith("model.") and ("arcface" not in k):
-                filtered[k.replace("model.", "", 1)] = v
+        # filtered = {}
+        # for k, v in state.items():
+        #     # only keep model.encoder.* or model.wavlm.*, model.projector.*, model.pooling.*
+        #     if k.startswith("model.") and ("arcface" not in k):
+        #         filtered[k.replace("model.", "", 1)] = v
 
-        print("Loaded teacher keys:", len(filtered))
+        # print("Loaded teacher keys:", len(filtered))
 
-        self.single_sp_model.load_state_dict(filtered, strict=True)
-        self.single_sp_model.eval()
-        for param in self.single_sp_model.parameters():
-            param.requires_grad = False
+        # self.single_sp_model.load_state_dict(filtered, strict=True)
+        # self.single_sp_model.eval()
+        # for param in self.single_sp_model.parameters():
+        #     param.requires_grad = False
 
 
 
         # -----------------------------
         # 3. Embedding metrics (for validation)
         # -----------------------------
-        self.metrics = SE_metrics(device="cpu")  # will overwrite device at runtime
+        # self.metrics = SE_metrics(device="cpu")  # will overwrite device at runtime
+        self.metrics = SE_metrics(fs=16000, device="cpu", use_dnsmos=True)
 
-        self.model = DCCRN(rnn_units=256,masking_mode='E',use_clstm=True,kernel_num=[32, 64, 128, 256, 256,256])
+        # self.model = DCCRN(rnn_units=256,masking_mode='E',use_clstm=True,kernel_num=[32, 64, 128, 256, 256,256])
+        self.model = ConvTasNet()
+        self.loss = PITSiSNRLoss()
 
 
-    def forward(self, wav, emb=None):
+    def forward(self, wav):
         """
         wav: [B, T] (or [B, 1, T])
         returns: [B, T] or ([B, 1, T])
         """
-        return self.model(wav, emb=emb)
+        return self.model(wav)
 
     # -----------------------------
     # TRAINING
     # -----------------------------
     def training_step(self, batch, batch_idx):
         mix, source, labels = batch  # mix: [B,T], source: [B,2,T]
+        out = self.forward(mix.unsqueeze(1)) #[B,2,T]
 
-        # ---- teacher embeddings from clean sources (oracle) ----
-        with torch.no_grad():
-            emb1 = self.single_sp_model(source[:, 0, :])  # [B,D]
-            emb2 = self.single_sp_model(source[:, 1, :])  # [B,D]
-
-        # ---- dual embeddings from mixture (frozen) ----
-        with torch.no_grad():
-            embs = self.dual_emb_model(mix)               # [B,2,D]
-            e1 = embs[:, 0, :]
-            e2 = embs[:, 1, :]
-
-        # ---- bijective assignment: decide which mixture embedding corresponds to which source ----
-        emb_for_0, emb_for_1, pick_id, margin = assign_embeddings_bijective(e1, e2, emb1, emb2)
-
-        # ---- two-pass enhancement/separation ----
-        y0 = self.forward(mix, emb=emb_for_0)[1]          # [B,T0]
-        y1 = self.forward(mix, emb=emb_for_1)[1]          # [B,T1]
-
-        # ---- crop consistently ----
-        T = min(y0.shape[-1], y1.shape[-1], source.shape[-1], mix.shape[-1])
-        y0 = y0[..., :T]; y1 = y1[..., :T]
-        s0 = source[:, 0, :T]
-        s1 = source[:, 1, :T]
-
-        # ---- loss (average across the two targets) ----
-        loss0 = self.model.loss(y0, s0, loss_mode="SI-SNR")
-        loss1 = self.model.loss(y1, s1, loss_mode="SI-SNR")
-        loss  = 0.5 * (loss0 + loss1)
+        min_len = min(out.shape[-1], source.shape[-1])
+        out = out[..., :min_len]
+        source = source[..., :min_len]
+        loss = self.loss(out, source)
 
         self.log("train/SI-SNR_loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=mix.size(0))
         # self.log("train/assign_margin", margin.mean(), on_step=True, on_epoch=True, prog_bar=False, batch_size=mix.size(0))
@@ -192,33 +118,11 @@ class E2EpSE(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         mix, source, labels = batch
-
-        with torch.no_grad():
-            emb1 = self.single_sp_model(source[:, 0, :])
-            emb2 = self.single_sp_model(source[:, 1, :])
-
-            embs = self.dual_emb_model(mix)
-            e1 = embs[:, 0, :]
-            e2 = embs[:, 1, :]
-
-            emb_for_0, emb_for_1, pick_id, margin = assign_embeddings_bijective(e1, e2, emb1, emb2)
-
-            y0 = self.forward(mix, emb=emb_for_0)[1]
-            y1 = self.forward(mix, emb=emb_for_1)[1]
-
-        T = min(y0.shape[-1], y1.shape[-1], source.shape[-1], mix.shape[-1])
-        y0 = y0[..., :T]; y1 = y1[..., :T]
-        s0 = source[:, 0, :T]
-        s1 = source[:, 1, :T]
-
-        # update metrics per speaker (counts as 2 items per mixture)
-        self.metrics.update(y0, s0)
-        self.metrics.update(y1, s1)
-
-        # optional: log assignment stats
-        self.log("val/assign_margin", margin.mean(), prog_bar=False, batch_size=mix.size(0))
-        self.log("val/pick_id_rate", pick_id.float().mean(), prog_bar=False, batch_size=mix.size(0))
-
+        out = self.forward(mix.unsqueeze(1)) #[B,2,T]
+        min_len = min(out.shape[-1], source.shape[-1])
+        out = out[..., :min_len]
+        source = source[..., :min_len]
+        self.metrics.update(out, source, mix_audio=mix)
         return {}
 
     # -----------------------------
@@ -237,76 +141,77 @@ class E2EpSE(pl.LightningModule):
             self.fixed_val_batch = (mix[:3].clone(), src[:3].clone())
 
         mix, src = self.fixed_val_batch
-        mix = mix.to(self.device)
-        src = src.to(self.device)
+        mix = mix.to(self.device)          # [B,T]
+        src = src.to(self.device)          # [B,2,T]
+
+        # --- helper: SI-SNR (higher is better) ---
+        def si_snr(est, ref, eps=1e-8):
+            """
+            est, ref: [B,T]
+            returns:  [B]
+            """
+            est = est - est.mean(dim=-1, keepdim=True)
+            ref = ref - ref.mean(dim=-1, keepdim=True)
+
+            # projection of est on ref
+            ref_energy = (ref ** 2).sum(dim=-1, keepdim=True) + eps
+            proj = (est * ref).sum(dim=-1, keepdim=True) * ref / ref_energy
+
+            noise = est - proj
+            ratio = (proj ** 2).sum(dim=-1) / ((noise ** 2).sum(dim=-1) + eps)
+            return 10.0 * torch.log10(ratio + eps)
 
         with torch.no_grad():
-            # teacher embeddings (clean sources)
-            emb0 = self.single_sp_model(src[:, 0, :])  # [B,D]
-            emb1 = self.single_sp_model(src[:, 1, :])  # [B,D]
+            out = self.forward(mix.unsqueeze(1))                 # ConvTasNet: list/tuple of 2 tensors (usually)
+            # out = torch.stack(out, dim=1)           # [B,2,T]  (if each out[k] is [B,T])
+            pred0_raw = out[:, 0, :]                # [B,T]
+            pred1_raw = out[:, 1, :]                # [B,T]
 
-            # mixture embeddings (unordered)
-            embs = self.dual_emb_model(mix)            # [B,2,D]
-            e1 = embs[:, 0, :]
-            e2 = embs[:, 1, :]
+        tgt0 = src[:, 0, :]                         # [B,T]
+        tgt1 = src[:, 1, :]                         # [B,T]
 
-            # 2x2 assignment (bijective): choose identity vs swap
-            c11 = cosine(e1, emb0)  # e1 vs spk0
-            c12 = cosine(e1, emb1)  # e1 vs spk1
-            c21 = cosine(e2, emb0)  # e2 vs spk0
-            c22 = cosine(e2, emb1)  # e2 vs spk1
-
-            score_id   = c11 + c22
-            score_swap = c12 + c21
-
-            pick_id = (score_id >= score_swap)              # [B] bool
-            pick_id_u = pick_id.unsqueeze(-1)               # [B,1]
-            margin = (score_id - score_swap).abs()          # [B]
-
-            # assigned embeddings per target (bijective)
-            emb_for_0 = torch.where(pick_id_u, e1, e2)      # [B,D]
-            emb_for_1 = torch.where(pick_id_u, e2, e1)      # [B,D]
-
-            # run enhancement twice
-            pred0 = self.forward(mix, emb=emb_for_0)[1]     # [B,T]
-            pred1 = self.forward(mix, emb=emb_for_1)[1]     # [B,T]
-
-        # GT targets
-        tgt0 = src[:, 0, :]
-        tgt1 = src[:, 1, :]
-
-        # Match lengths
-        min_len = min(mix.shape[-1], tgt0.shape[-1], tgt1.shape[-1], pred0.shape[-1], pred1.shape[-1])
-        mix  = mix[...,  :min_len]
+        # Match lengths (global min so everything aligns for logging)
+        min_len = min(mix.shape[-1], tgt0.shape[-1], tgt1.shape[-1], pred0_raw.shape[-1], pred1_raw.shape[-1])
+        mix = mix[..., :min_len]
         tgt0 = tgt0[..., :min_len]
         tgt1 = tgt1[..., :min_len]
-        pred0 = pred0[..., :min_len]
-        pred1 = pred1[..., :min_len]
+        pred0_raw = pred0_raw[..., :min_len]
+        pred1_raw = pred1_raw[..., :min_len]
+
+        # --- PIT-style matching for logging (per-sample) ---
+        s_id   = si_snr(pred0_raw, tgt0) + si_snr(pred1_raw, tgt1)   # [B]
+        s_swap = si_snr(pred0_raw, tgt1) + si_snr(pred1_raw, tgt0)   # [B]
+        pick_id = (s_id >= s_swap)                                   # True => (pred0->tgt0, pred1->tgt1)
+        margin = (s_id - s_swap).abs()                               # [B]
+
+        # reorder preds for clean visualization (matched to tgt0/tgt1)
+        pick = pick_id.view(-1, 1)
+        pred0 = torch.where(pick, pred0_raw, pred1_raw)
+        pred1 = torch.where(pick, pred1_raw, pred0_raw)
 
         run = self.logger.experiment
+        sr = getattr(self.trainer.datamodule, "sampling_rate", 16000)
 
-        # Log each sample
         for i in range(mix.shape[0]):
             m_np  = mix[i].detach().cpu().numpy().astype("float32")
 
             t0_np = tgt0[i].detach().cpu().numpy().astype("float32")
-            p0_np = pred0[i].detach().cpu().numpy().astype("float32")
-
             t1_np = tgt1[i].detach().cpu().numpy().astype("float32")
+
+            p0_np = pred0[i].detach().cpu().numpy().astype("float32")
             p1_np = pred1[i].detach().cpu().numpy().astype("float32")
 
-            run.log({f"audio/mix_{i}":  wandb.Audio(m_np,  sample_rate=16000)})
+            run.log({f"audio/mix_{i}":  wandb.Audio(m_np,  sample_rate=sr)})
+            run.log({f"audio/tgt0_{i}": wandb.Audio(t0_np, sample_rate=sr)})
+            run.log({f"audio/pred0_{i}": wandb.Audio(p0_np, sample_rate=sr)})
+            run.log({f"audio/tgt1_{i}": wandb.Audio(t1_np, sample_rate=sr)})
+            run.log({f"audio/pred1_{i}": wandb.Audio(p1_np, sample_rate=sr)})
 
-            run.log({f"audio/tgt0_{i}": wandb.Audio(t0_np, sample_rate=16000)})
-            run.log({f"audio/pred0_{i}": wandb.Audio(p0_np, sample_rate=16000)})
-
-            run.log({f"audio/tgt1_{i}": wandb.Audio(t1_np, sample_rate=16000)})
-            run.log({f"audio/pred1_{i}": wandb.Audio(p1_np, sample_rate=16000)})
-
-            # assignment info
             run.log({
-                f"sel/pick_id_{i}": int(pick_id[i].item()),      # 1=id (e1->tgt0), 0=swap
+                f"sel/pick_id_{i}": int(pick_id[i].item()),   # 1 = ID, 0 = SWAP
                 f"sel/margin_{i}": float(margin[i].item()),
+                f"sel/s_id_{i}": float(s_id[i].item()),
+                f"sel/s_swap_{i}": float(s_swap[i].item()),
             })
 
     # def get_pred_from_mix(self, mix, source):
@@ -350,8 +255,9 @@ class E2EpSE(pl.LightningModule):
     # -----------------------------
     # OPTIMIZER + SCHEDULER
     # -----------------------------
+
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=0.01)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=1e-5)
         # return optimizer
 
         # monitor one of the embedding metrics, e.g., separation (higher is better)
@@ -361,7 +267,6 @@ class E2EpSE(pl.LightningModule):
             factor=0.5,
             patience=3,
         )
-
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -383,7 +288,7 @@ if __name__ == "__main__":
     dm = LibriMixDataModule(
         data_root=DATA_ROOT,
         speaker_map_path=SPEAKER_MAP,
-        batch_size=8, 
+        batch_size=2, 
         num_workers=20, # Set this to your preference
         num_speakers=2
     )
@@ -397,24 +302,25 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="pDCCRN_2sp",
-        name="pDCCRN_2sp_sep",
+        name="convtasnet_2sp_sep_",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_2sp_sep/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/convtasnet_2sp_sep_/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
         monitor="train/SI-SNR_loss",
         mode="min",
-        save_top_k=1,
+        save_top_k=-1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_2sp_sep/"
+        dirpath="/mnt/disks/data/model_ckpts/convtasnet_2sp_sep_/"
     )
 
     trainer = pl.Trainer(
         strategy="ddp",
         accelerator="gpu",
         devices=[0, 1, 2, 3],
+
         max_epochs=100,
         logger=wandb_logger,
         callbacks=[ckpt],
