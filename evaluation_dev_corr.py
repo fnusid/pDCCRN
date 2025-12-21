@@ -21,8 +21,8 @@ def main():
         "/mnt/disks/data/model_ckpts/convtasnet_2sp_sep_/best-epoch=14-val_separation=0.000.ckpt"
     )
 
-    batch_size = 8
-    num_workers = 4
+    batch_size = 16
+    num_workers = 20
     num_speakers = 2
     sample_rate = 16000
 
