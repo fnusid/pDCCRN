@@ -18,8 +18,7 @@ def main():
     )
 
     ckpt_path = (
-        "/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360/"
-        "best-epoch=66-val_separation=0.000.ckpt"
+        "/mnt/disks/data/model_ckpts/convtasnet_2sp_sep_/best-epoch=14-val_separation=0.000.ckpt"
     )
 
     batch_size = 8
