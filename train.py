@@ -126,7 +126,7 @@ class E2EpSE(pl.LightningModule):
           labels: [B, 2]  (speaker IDs, already mapped to [0..num_classes-1])
         """
         mix, source, labels = batch
-        emb = self.forward(mix)                    # [B, 3, emb_dim]
+        # emb = self.forward(mix)                    # [B, 3, emb_dim]
         #change here
         with torch.no_grad():
             emb1 = self.single_sp_model(source[:, 0, :])  # [B, emb_dim]
@@ -160,6 +160,7 @@ class E2EpSE(pl.LightningModule):
         batch_idx = torch.arange(embs.size(0), device=embs.device)
         pred_emb = embs[batch_idx, best_idx, :]       # [B, D]
         #condition dccrn on pred_emb
+
         out = self.forward(mix, emb = pred_emb)[1] #get the wav
 
         min_len = min(out.shape[-1], target_speech.shape[-1])
@@ -225,6 +226,7 @@ class E2EpSE(pl.LightningModule):
         pred_emb = embs[batch_idx, best_idx, :]       # [B, D]        
     
         #condition dccrn on pred_emb
+     
         out = self.forward(mix, emb = pred_emb)[1] #get the wav
         min_len = min(out.shape[-1], target_speech.shape[-1])
         out = out[..., :min_len]
@@ -432,6 +434,7 @@ if __name__ == "__main__":
         strategy="ddp",
         accelerator="gpu",
         devices=[0, 1, 2, 3],
+
         max_epochs=100,
         logger=wandb_logger,
         callbacks=[ckpt],
@@ -459,7 +462,7 @@ if __name__ == "__main__":
     #     limit_val_batches=1,
     #     num_sanity_val_steps=0,
     # )
-    # trainer.fit(model, datamodule=dm)
-    trainer.test(model, datamodule=dm, ckpt_path="/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_tr360/best-epoch=65-val_separation=0.000.ckpt")
+    trainer.fit(model, datamodule=dm)
+    # trainer.test(model, datamodule=dm, ckpt_path="/mnt/disks/data/model_ckpts/pDCCRN_2sp_oracle_tr360/best-epoch=65-val_separation=0.000.ckpt")
     # trainer.validate(model, datamodule=dm)
     wandb.finish()
