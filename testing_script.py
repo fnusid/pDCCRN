@@ -17,12 +17,11 @@ def main():
     )
 
     ckpt_path = (
-        "/mnt/disks/data/model_ckpts/pDCCRN_2sp_tr360/"
-        "best-epoch=66-val_separation=0.000.ckpt"
+        "/mnt/disks/data/model_ckpts/pDCCRN_3sp_tr360/best-epoch=65-val_separation=0.000.ckpt"
     )
 
-    batch_size = 8
-    num_workers = 4
+    batch_size = 16
+    num_workers = 20
     num_speakers = 3
     sample_rate = 16000
 
