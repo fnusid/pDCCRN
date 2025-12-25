@@ -7,29 +7,24 @@ from torchmetrics.audio import ShortTimeObjectiveIntelligibility
 from torchmetrics.audio import ScaleInvariantSignalDistortionRatio
 from torchmetrics.audio import DeepNoiseSuppressionMeanOpinionScore
 
+from itertools import permutations
+
 EPS = 1e-8
 
-
 def si_snr(est: torch.Tensor, ref: torch.Tensor, eps: float = EPS) -> torch.Tensor:
-    """
-    est, ref: [B, T]
-    returns:  [B]
-    """
+    # est, ref: [B,T] -> [B]
     est = est - est.mean(dim=-1, keepdim=True)
     ref = ref - ref.mean(dim=-1, keepdim=True)
-
     ref_energy = (ref * ref).sum(dim=-1, keepdim=True) + eps
     proj = (est * ref).sum(dim=-1, keepdim=True) * ref / ref_energy
     noise = est - proj
     ratio = (proj * proj).sum(dim=-1) / ((noise * noise).sum(dim=-1) + eps)
     return 10.0 * torch.log10(ratio + eps)
 
-
 def pit_reorder_by_sisnr(pred: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
     """
-    pred, tgt: [B, C, T]
-    returns: pred_reordered: [B, C, T] matched to tgt using SI-SNR PIT
-    Currently optimized for C=2. For C>2, you can extend similarly.
+    pred, tgt: [B,C,T]
+    returns: pred_reordered [B,C,T] aligned so channel c matches tgt[:,c,:]
     """
     if pred.ndim != 3 or tgt.ndim != 3:
         raise RuntimeError(f"Expected [B,C,T], got pred={pred.shape}, tgt={tgt.shape}")
@@ -37,20 +32,35 @@ def pit_reorder_by_sisnr(pred: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
         raise RuntimeError(f"Shape mismatch pred={pred.shape}, tgt={tgt.shape}")
 
     B, C, T = pred.shape
-    if C != 2:
-        # Keep it simple; extend if you do 3sp separation baselines.
+    if C == 1:
         return pred
 
-    p0, p1 = pred[:, 0, :], pred[:, 1, :]
-    t0, t1 = tgt[:, 0, :], tgt[:, 1, :]
+    # build pairwise SI-SNR matrix: pair[b, out_c, tgt_c]
+    pair = torch.empty((B, C, C), device=pred.device, dtype=pred.dtype)
+    for i in range(C):
+        for j in range(C):
+            pair[:, i, j] = si_snr(pred[:, i, :], tgt[:, j, :])
 
-    s_id   = si_snr(p0, t0) + si_snr(p1, t1)   # [B]
-    s_swap = si_snr(p0, t1) + si_snr(p1, t0)   # [B]
-    pick = (s_id >= s_swap).view(B, 1,)      # [B,1]
+    perms = torch.tensor(list(permutations(range(C))), device=pred.device, dtype=torch.long)  # [P,C]
+    P = perms.shape[0]
+    ar = torch.arange(C, device=pred.device)
 
-    pred0 = torch.where(pick, p0, p1)
-    pred1 = torch.where(pick, p1, p0)
-    return torch.stack([pred0, pred1], dim=1)  # [B,2,T]
+    # score[p,b] = sum_c pair[b, c, perms[p,c]]
+    scores = []
+    for p in range(P):
+        scores.append(pair[:, ar, perms[p]].sum(dim=1))  # [B]
+    scores = torch.stack(scores, dim=0)  # [P,B]
+
+    best_p = scores.argmax(dim=0)              # [B]
+    best_perm = perms[best_p]                  # [B,C] mapping out_c -> tgt_c
+
+    # invert mapping to get tgt_c -> out_c, so we can reorder pred into tgt order
+    inv = torch.empty_like(best_perm)
+    for out_c in range(C):
+        inv.scatter_(1, best_perm[:, out_c:out_c+1], out_c)
+
+    gather_idx = inv.unsqueeze(-1).expand(-1, -1, T)  # [B,C,T]
+    return pred.gather(dim=1, index=gather_idx)
 
 
 class SE_metrics(nn.Module):

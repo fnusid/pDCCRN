@@ -181,7 +181,7 @@ class LibriMixDataModule(pl.LightningDataModule):
     def __init__(self, data_root, speaker_map_path, 
                 batch_size=32,
                 num_workers=0,
-                num_speakers=2,
+                num_speakers=3,
                 sample_rate=16000):
         
         super().__init__()
@@ -194,7 +194,7 @@ class LibriMixDataModule(pl.LightningDataModule):
 
         self.persistent_workers = True if self.num_workers > 0 else False
 
-        self.base_data_path = os.path.join(self.data_root, f"Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min") #/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/mixture_train-360_mix_clean.csv
+        self.base_data_path = os.path.join(self.data_root, f"3sp/Libri3Mix_ovl50to80/wav16k/min") #/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json
 
         self.metadata_path = os.path.join(self.base_data_path, "metadata")
 

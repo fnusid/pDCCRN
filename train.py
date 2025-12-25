@@ -36,7 +36,7 @@ class E2EpSE(pl.LightningModule):
         lr: float = 1e-4,
         finetune_encoder: bool = False,
         emb_dim: int = 256,
-        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_03_08/Libri2Mix_ovl30to80/wav16k/min/metadata/train360_mapping.json",
+        speaker_map_path: str = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json",
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -82,7 +82,7 @@ class E2EpSE(pl.LightningModule):
         self.metrics = SE_metrics(fs=16000, device="cpu", use_dnsmos=True)
 
         # self.model = DCCRN(rnn_units=256,masking_mode='E',use_clstm=True,kernel_num=[32, 64, 128, 256, 256,256])
-        self.model = ConvTasNet()
+        self.model = ConvTasNet(num_sources=3)
         self.loss = PITSiSNRLoss()
 
 
@@ -166,28 +166,63 @@ class E2EpSE(pl.LightningModule):
             # out = torch.stack(out, dim=1)           # [B,2,T]  (if each out[k] is [B,T])
             pred0_raw = out[:, 0, :]                # [B,T]
             pred1_raw = out[:, 1, :]                # [B,T]
+            pred2_raw = out[:, 2, :]                # [B,T]
 
         tgt0 = src[:, 0, :]                         # [B,T]
         tgt1 = src[:, 1, :]                         # [B,T]
+        tgt2 = src[:, 2, :]                         # [B,T]
 
         # Match lengths (global min so everything aligns for logging)
-        min_len = min(mix.shape[-1], tgt0.shape[-1], tgt1.shape[-1], pred0_raw.shape[-1], pred1_raw.shape[-1])
+        min_len = min(mix.shape[-1], tgt0.shape[-1], tgt1.shape[-1], tgt2.shape[-1], pred0_raw.shape[-1], pred1_raw.shape[-1], pred2_raw.shape[-1])
         mix = mix[..., :min_len]
         tgt0 = tgt0[..., :min_len]
         tgt1 = tgt1[..., :min_len]
+        tgt2 = tgt2[..., :min_len]
         pred0_raw = pred0_raw[..., :min_len]
         pred1_raw = pred1_raw[..., :min_len]
+        pred2_raw = pred2_raw[..., :min_len]
 
-        # --- PIT-style matching for logging (per-sample) ---
-        s_id   = si_snr(pred0_raw, tgt0) + si_snr(pred1_raw, tgt1)   # [B]
-        s_swap = si_snr(pred0_raw, tgt1) + si_snr(pred1_raw, tgt0)   # [B]
-        pick_id = (s_id >= s_swap)                                   # True => (pred0->tgt0, pred1->tgt1)
-        margin = (s_id - s_swap).abs()                               # [B]
+        pred = torch.stack([pred0_raw, pred1_raw, pred2_raw], dim=1)  # [B,3,T]
 
-        # reorder preds for clean visualization (matched to tgt0/tgt1)
-        pick = pick_id.view(-1, 1)
-        pred0 = torch.where(pick, pred0_raw, pred1_raw)
-        pred1 = torch.where(pick, pred1_raw, pred0_raw)
+        # perms: (which pred goes to tgt0, tgt1, tgt2)
+        perms = torch.tensor(
+            [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ],
+            device=pred.device,
+            dtype=torch.long,
+        )  # [6,3]
+
+        # compute PIT scores for each permutation -> [B,6]
+        scores = []
+        for k in range(perms.size(0)):
+            p0, p1, p2 = perms[k].tolist()
+            s = si_snr(pred[:, p0, :], tgt0) + si_snr(pred[:, p1, :], tgt1) + si_snr(pred[:, p2, :], tgt2)  # [B]
+            scores.append(s)
+        scores = torch.stack(scores, dim=1)  # [B,6]
+
+        # best perm per sample
+        best_score, best_idx = scores.max(dim=1)  # [B], [B]
+
+        # margin = best - second_best
+        top2_vals, _ = torch.topk(scores, k=2, dim=1)  # [B,2]
+        second_best = top2_vals[:, 1]
+        margin = (top2_vals[:, 0] - top2_vals[:, 1])   # [B]
+
+        # Reorder predictions according to best permutation
+        # gather indices for dim=1
+        chosen = perms[best_idx]                       # [B,3]
+        gather_idx = chosen.unsqueeze(-1).expand(-1, -1, pred.size(-1))  # [B,3,T]
+        pred_reordered = torch.gather(pred, dim=1, index=gather_idx)     # [B,3,T]
+
+        pred0 = pred_reordered[:, 0, :]
+        pred1 = pred_reordered[:, 1, :]
+        pred2 = pred_reordered[:, 2, :]
 
         run = self.logger.experiment
         sr = getattr(self.trainer.datamodule, "sampling_rate", 16000)
@@ -197,22 +232,34 @@ class E2EpSE(pl.LightningModule):
 
             t0_np = tgt0[i].detach().cpu().numpy().astype("float32")
             t1_np = tgt1[i].detach().cpu().numpy().astype("float32")
+            t2_np = tgt2[i].detach().cpu().numpy().astype("float32")
 
             p0_np = pred0[i].detach().cpu().numpy().astype("float32")
             p1_np = pred1[i].detach().cpu().numpy().astype("float32")
+            p2_np = pred2[i].detach().cpu().numpy().astype("float32")
 
             run.log({f"audio/mix_{i}":  wandb.Audio(m_np,  sample_rate=sr)})
+
             run.log({f"audio/tgt0_{i}": wandb.Audio(t0_np, sample_rate=sr)})
             run.log({f"audio/pred0_{i}": wandb.Audio(p0_np, sample_rate=sr)})
+
             run.log({f"audio/tgt1_{i}": wandb.Audio(t1_np, sample_rate=sr)})
             run.log({f"audio/pred1_{i}": wandb.Audio(p1_np, sample_rate=sr)})
 
-            run.log({
-                f"sel/pick_id_{i}": int(pick_id[i].item()),   # 1 = ID, 0 = SWAP
-                f"sel/margin_{i}": float(margin[i].item()),
-                f"sel/s_id_{i}": float(s_id[i].item()),
-                f"sel/s_swap_{i}": float(s_swap[i].item()),
-            })
+            run.log({f"audio/tgt2_{i}": wandb.Audio(t2_np, sample_rate=sr)})
+            run.log({f"audio/pred2_{i}": wandb.Audio(p2_np, sample_rate=sr)})
+
+            # log assignment info
+            # perm = perms[best_idx[i]].detach().cpu().tolist()  # e.g. [2,0,1]
+            # run.log({
+            #     f"sel/best_perm_idx_{i}": int(best_idx[i].item()),     # 0..5
+            #     f"sel/perm_tgt0_{i}": int(perm[0]),                    # which pred used for tgt0
+            #     f"sel/perm_tgt1_{i}": int(perm[1]),
+            #     f"sel/perm_tgt2_{i}": int(perm[2]),
+            #     f"sel/margin_{i}": float(margin[i].item()),
+            #     f"sel/best_score_{i}": float(best_score[i].item()),
+            #     f"sel/second_best_{i}": float(second_best[i].item()),
+            # })
 
     # def get_pred_from_mix(self, mix, source):
     #     """
@@ -282,7 +329,7 @@ class E2EpSE(pl.LightningModule):
 # ---------------------------------------
 if __name__ == "__main__":
     DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
 
     dm = LibriMixDataModule(
@@ -290,7 +337,7 @@ if __name__ == "__main__":
         speaker_map_path=SPEAKER_MAP,
         batch_size=2, 
         num_workers=20, # Set this to your preference
-        num_speakers=2
+        num_speakers=3
     )
 
     model = E2EpSE(
@@ -301,11 +348,11 @@ if __name__ == "__main__":
     )
 
     wandb_logger = WandbLogger(
-        project="pDCCRN_2sp",
-        name="convtasnet_2sp_sep_",
+        project="pDCCRN_3sp",
+        name="convtasnet_3sp_sep_",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/convtasnet_2sp_sep_/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/convtasnet_3sp_sep_/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -313,7 +360,7 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=-1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/convtasnet_2sp_sep_/"
+        dirpath="/mnt/disks/data/model_ckpts/convtasnet_3sp_sep_/"
     )
 
     trainer = pl.Trainer(
