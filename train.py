@@ -57,32 +57,63 @@ def cosine(a, b):
     return dot / (an * bn)
 
 
-def assign_embeddings_bijective(e1, e2, emb1, emb2):
+def assign_embeddings_bijective_3(e1, e2, e3, emb1, emb2, emb3, eps=1e-8):
     """
-    e1,e2:   [B,D] mixture-derived (unordered)
-    emb1,2:  [B,D] teacher embeddings for source0/source1 (ordered)
+    e1,e2,e3:     [B,D] mixture-derived (unordered)
+    emb1,2,3:     [B,D] teacher embeddings for source0/source1/source2 (ordered)
     Returns:
-      emb_for_0, emb_for_1: [B,D] such that:
-        emb_for_0 corresponds to source[:,0] and emb_for_1 to source[:,1]
-      pick_id: [B] bool, True means (e1->spk0, e2->spk1), else swapped
-      margin:  [B] confidence margin between the two assignments
+      emb_for_0, emb_for_1, emb_for_2: [B,D] aligned to source[:,0/1/2]
+      perm_id:    [B] int in [0..5], which permutation was chosen
+      perm_idx:   [B,3] where perm_idx[:,k] is which {e1,e2,e3} went to speaker k
+      margin:     [B] confidence margin = best_score - second_best_score
+      best_score: [B] best total cosine score
     """
-    c11 = cosine(e1, emb1)  # e1 vs spk0
-    c12 = cosine(e1, emb2)  # e1 vs spk1
-    c21 = cosine(e2, emb1)  # e2 vs spk0
-    c22 = cosine(e2, emb2)  # e2 vs spk1
 
-    score_id   = c11 + c22
-    score_swap = c12 + c21
+    # Stack: mixture-derived and teacher/target embeddings
+    E = torch.stack([e1, e2, e3], dim=1)        # [B,3,D]
+    T = torch.stack([emb1, emb2, emb3], dim=1)  # [B,3,D]
 
-    pick_id = (score_id >= score_swap)          # [B]
-    pick_id_u = pick_id.unsqueeze(-1)           # [B,1]
+    # Cosine matrix C[b,i,j] = cos(E[b,i], T[b,j])
+    # Normalize then matmul to get all pairwise cosines efficiently.
+    En = F.normalize(E, dim=-1, eps=eps)        # [B,3,D]
+    Tn = F.normalize(T, dim=-1, eps=eps)        # [B,3,D]
+    C = torch.matmul(En, Tn.transpose(1, 2))    # [B,3,3]
 
-    emb_for_0 = torch.where(pick_id_u, e1, e2)  # spk0 gets e1 if id else e2
-    emb_for_1 = torch.where(pick_id_u, e2, e1)  # spk1 gets the other
+    # All 6 bijective assignments: speaker k gets mixture embedding perm[p][k]
+    perms = torch.tensor([
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ], device=E.device, dtype=torch.long)       # [6,3]
 
-    margin = (score_id - score_swap).abs()      # [B]
-    return emb_for_0, emb_for_1, pick_id, margin
+    # Score each permutation: sum_k C[:, perm[k], k]
+    # -> scores: [B,6]
+    scores = []
+    for p in range(perms.size(0)):
+        idx = perms[p]                          # [3]
+        # speaker indices are fixed: 0,1,2
+        s = C[:, idx[0], 0] + C[:, idx[1], 1] + C[:, idx[2], 2]  # [B]
+        scores.append(s)
+    scores = torch.stack(scores, dim=1)         # [B,6]
+
+    # Best perm + margin vs 2nd best
+    best_score, perm_id = scores.max(dim=1)     # [B], [B]
+    top2 = scores.topk(k=2, dim=1).values       # [B,2]
+    margin = top2[:, 0] - top2[:, 1]            # [B]
+
+    # Gather aligned embeddings for each speaker
+    B = E.size(0)
+    perm_idx = perms[perm_id]                   # [B,3]
+    aligned = E[torch.arange(B, device=E.device)[:, None], perm_idx]  # [B,3,D]
+
+    emb_for_0 = aligned[:, 0, :]
+    emb_for_1 = aligned[:, 1, :]
+    emb_for_2 = aligned[:, 2, :]
+
+    return emb_for_0, emb_for_1, emb_for_2, perm_id, perm_idx, margin, best_score
 
 class E2EpSE(pl.LightningModule):
     def __init__(
@@ -100,7 +131,7 @@ class E2EpSE(pl.LightningModule):
         device="cuda" if torch.cuda.is_available() else "cpu"   
         #Get the dual-emb model and teacher model
         
-        dual_emb_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_ft_wavlm_linear_dualemb_tr360/best-epoch=49-val_separation=0.000.ckpt"
+        dual_emb_ckpt_path = "/mnt/disks/data/model_ckpts/librispeech_asp_3spft_wavlm_linear_dualemb_tr360/best-epoch=54-val_separation=0.000.ckpt"
         dual_emb_ckpt = torch.load(dual_emb_ckpt_path, map_location=device)
         state = strip_dual_model_weights(dual_emb_ckpt["state_dict"])
         self.dual_emb_model = SpeakerEncoderDualWrapper(emb_dim=emb_dim)
@@ -154,30 +185,34 @@ class E2EpSE(pl.LightningModule):
         with torch.no_grad():
             emb1 = self.single_sp_model(source[:, 0, :])  # [B,D]
             emb2 = self.single_sp_model(source[:, 1, :])  # [B,D]
+            emb3 = self.single_sp_model(source[:, 2, :])  # [B,D]
 
         # ---- dual embeddings from mixture (frozen) ----
         with torch.no_grad():
             embs = self.dual_emb_model(mix)               # [B,2,D]
             e1 = embs[:, 0, :]
             e2 = embs[:, 1, :]
+            e3 = embs[:, 2, :]
 
         # ---- bijective assignment: decide which mixture embedding corresponds to which source ----
-        emb_for_0, emb_for_1, pick_id, margin = assign_embeddings_bijective(e1, e2, emb1, emb2)
+        emb_for_0, emb_for_1, emb_for_2,  perm_id, perm_idx, margin, best_score= assign_embeddings_bijective_3(e1, e2, e3, emb1, emb2, emb3)
 
         # ---- two-pass enhancement/separation ----
         y0 = self.forward(mix, emb=emb_for_0)[1]          # [B,T0]
         y1 = self.forward(mix, emb=emb_for_1)[1]          # [B,T1]
-
+        y2 = self.forward(mix, emb=emb_for_2)[1]          # [B,T2]
         # ---- crop consistently ----
-        T = min(y0.shape[-1], y1.shape[-1], source.shape[-1], mix.shape[-1])
-        y0 = y0[..., :T]; y1 = y1[..., :T]
+        T = min(y0.shape[-1], y1.shape[-1], y2.shape[-1], source.shape[-1], mix.shape[-1])
+        y0 = y0[..., :T]; y1 = y1[..., :T]; y2 = y2[..., :T]
         s0 = source[:, 0, :T]
         s1 = source[:, 1, :T]
+        s2 = source[:, 2, :T]
 
         # ---- loss (average across the two targets) ----
         loss0 = self.model.loss(y0, s0, loss_mode="SI-SNR")
         loss1 = self.model.loss(y1, s1, loss_mode="SI-SNR")
-        loss  = 0.5 * (loss0 + loss1)
+        loss2 = self.model.loss(y2, s2, loss_mode="SI-SNR")
+        loss  = 0.33 * (loss0 + loss1 + loss2)
 
         self.log("train/SI-SNR_loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=mix.size(0))
         # self.log("train/assign_margin", margin.mean(), on_step=True, on_epoch=True, prog_bar=False, batch_size=mix.size(0))
@@ -196,28 +231,33 @@ class E2EpSE(pl.LightningModule):
         with torch.no_grad():
             emb1 = self.single_sp_model(source[:, 0, :])
             emb2 = self.single_sp_model(source[:, 1, :])
+            emb3 = self.single_sp_model(source[:, 2, :])
 
             embs = self.dual_emb_model(mix)
             e1 = embs[:, 0, :]
             e2 = embs[:, 1, :]
+            e3 = embs[:, 2, : ]
 
-            emb_for_0, emb_for_1, pick_id, margin = assign_embeddings_bijective(e1, e2, emb1, emb2)
+            emb_for_0, emb_for_1, emb_for_2,  perm_id, perm_idx, margin, best_score= assign_embeddings_bijective_3(e1, e2, e3, emb1, emb2, emb3)
 
             y0 = self.forward(mix, emb=emb_for_0)[1]
             y1 = self.forward(mix, emb=emb_for_1)[1]
+            y2 = self.forward(mix, emb=emb_for_2)[1]
 
-        T = min(y0.shape[-1], y1.shape[-1], source.shape[-1], mix.shape[-1])
-        y0 = y0[..., :T]; y1 = y1[..., :T]
+        T = min(y0.shape[-1], y1.shape[-1], y2.shape[-1], source.shape[-1], mix.shape[-1])
+        y0 = y0[..., :T]; y1 = y1[..., :T]; y2 = y2[..., :T]
         s0 = source[:, 0, :T]
         s1 = source[:, 1, :T]
+        s2 = source[:, 2, :T]
 
         # update metrics per speaker (counts as 2 items per mixture)
         self.metrics.update(y0, s0)
         self.metrics.update(y1, s1)
+        self.metrics.update(y2, s2)
 
         # optional: log assignment stats
-        self.log("val/assign_margin", margin.mean(), prog_bar=False, batch_size=mix.size(0))
-        self.log("val/pick_id_rate", pick_id.float().mean(), prog_bar=False, batch_size=mix.size(0))
+        # self.log("val/assign_margin", margin.mean(), prog_bar=False, batch_size=mix.size(0))
+        # self.log("val/pick_id_rate", pick_id.float().mean(), prog_bar=False, batch_size=mix.size(0))
 
         return {}
 
@@ -377,7 +417,7 @@ class E2EpSE(pl.LightningModule):
 # ---------------------------------------
 if __name__ == "__main__":
     DATA_ROOT = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix" 
-    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    SPEAKER_MAP = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
 
 
     dm = LibriMixDataModule(
@@ -385,7 +425,7 @@ if __name__ == "__main__":
         speaker_map_path=SPEAKER_MAP,
         batch_size=8, 
         num_workers=20, # Set this to your preference
-        num_speakers=2
+        num_speakers=3
     )
 
     model = E2EpSE(
@@ -396,11 +436,11 @@ if __name__ == "__main__":
     )
 
     wandb_logger = WandbLogger(
-        project="pDCCRN_2sp",
-        name="pDCCRN_2sp_sep",
+        project="pDCCRN_3sp",
+        name="pDCCRN_3sp_sep",
         # name='test_run',
         log_model=False,
-        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_2sp_sep/wandb_logs",
+        save_dir="/mnt/disks/data/model_ckpts/pDCCRN_3sp_sep/wandb_logs",
     )
 
     ckpt = pl.callbacks.ModelCheckpoint(
@@ -408,7 +448,7 @@ if __name__ == "__main__":
         mode="min",
         save_top_k=1,
         filename="best-{epoch}-{val_separation:.3f}",
-        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_2sp_sep/"
+        dirpath="/mnt/disks/data/model_ckpts/pDCCRN_3sp_sep/"
     )
 
     trainer = pl.Trainer(
