@@ -9,7 +9,8 @@ from metrics import SE_metrics  # same class you use in E2EpSE
 import sys
 sys.path.append('/home/sidharth./codebase')
 from wavlm_single_embedding.eval_metrics import compute_separation, compute_clustering_metrics, load_model
-
+import itertools
+perms = list(itertools.permutations([0, 1, 2]))
 
 ###########FINISH THIS#####################
 def si_snr(est: torch.Tensor, ref: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -37,20 +38,21 @@ def main():
     # 1) Config
     # ------------------------
     data_root = "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix"
-    speaker_map_path = (
-        "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
-    )
+    # speaker_map_path = (
+    #     "/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/Libriuni_05_08/Libri2Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json"
+    # )
+    speaker_map_path = ("/mnt/disks/data/datasets/Datasets/LibriMix/LibriMix/3sp/Libri3Mix_ovl50to80/wav16k/min/metadata/train360_mapping.json")
 
     ckpt_path = (
-        "/mnt/disks/data/model_ckpts/convtasnet_2sp_sep_/best-epoch=14-val_separation=0.000.ckpt"
+        "/mnt/disks/data/model_ckpts/convtasnet_3sp_sep_/best-epoch=18-val_separation=0.000.ckpt"
     )
 
     emb_ckpt = "/mnt/disks/data/model_ckpts/librispeech_asp_wavlm_tr360/best-epoch=62-val_separation=0.000.ckpt"
     
 
     batch_size = 16
-    num_workers = 20
-    num_speakers = 2
+    num_workers = 0
+    num_speakers = 3
     sample_rate = 16000
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -106,18 +108,45 @@ def main():
             # reuse the exact validation code from E2EpSE
             out, source, labels = system.validation_step((mix, src, labels), batch_idx)
 
-            # do PIT per-sample and swap labels to match the chosen ordering
-            s_corr = si_snr(out[:, 0, :], source[:, 0, :]) + si_snr(out[:, 1, :], source[:, 1, :])
-            s_swap = si_snr(out[:, 0, :], source[:, 1, :]) + si_snr(out[:, 1, :], source[:, 0, :])
-            swap_mask = s_swap > s_corr  # [B]
-            out_reordered = out.clone()
-            out_reordered[swap_mask, 0, :] = out[swap_mask, 1, :]
-            out_reordered[swap_mask, 1, :] = out[swap_mask, 0, :]
-            labels_reordered = labels.clone()
-            labels_reordered[swap_mask, 0] = labels[swap_mask, 1]
-            labels_reordered[swap_mask, 1] = labels[swap_mask, 0]
+            # # do PIT per-sample and swap labels to match the chosen ordering (2sp)
+            # s_corr = si_snr(out[:, 0, :], source[:, 0, :]) + si_snr(out[:, 1, :], source[:, 1, :])
+            # s_swap = si_snr(out[:, 0, :], source[:, 1, :]) + si_snr(out[:, 1, :], source[:, 0, :])
+            # swap_mask = s_swap > s_corr  # [B]
+            # out_reordered = out.clone()
+            # out_reordered[swap_mask, 0, :] = out[swap_mask, 1, :]
+            # out_reordered[swap_mask, 1, :] = out[swap_mask, 0, :]
+            # labels_reordered = labels.clone()
+            # labels_reordered[swap_mask, 0] = labels[swap_mask, 1]
+            # labels_reordered[swap_mask, 1] = labels[swap_mask, 0]
 
-            emb = emb_model(torch.concat([out_reordered[:, 0, :], out_reordered[:, 1, :]], dim=0))  # [2B, D]
+            # do PIT per-sample and swap labels to match the chosen ordering (3sp)
+            scores = []
+            for p in perms:
+                s = (
+                    si_snr(out[:, p[0], :], source[:, 0, :]) +
+                    si_snr(out[:, p[1], :], source[:, 1, :]) +
+                    si_snr(out[:, p[2], :], source[:, 2, :])
+                )
+                scores.append(s)
+            scores = torch.stack(scores, dim=1)  # [B, 6]
+
+            best_idx = scores.argmax(dim=1)  # [B]
+            out_reordered = out.clone()
+            labels_reordered = labels.clone()
+
+            for pi, p in enumerate(perms):
+                mask = best_idx == pi
+                if mask.any():
+                    out_reordered[mask, 0, :] = out[mask, p[0], :]
+                    out_reordered[mask, 1, :] = out[mask, p[1], :]
+                    out_reordered[mask, 2, :] = out[mask, p[2], :]
+                    labels_reordered[mask, 0] = labels[mask, p[0]]
+                    labels_reordered[mask, 1] = labels[mask, p[1]]
+                    labels_reordered[mask, 2] = labels[mask, p[2]]
+
+            # emb = emb_model(torch.concat([out_reordered[:, 0, :], out_reordered[:, 1, :]], dim=0))  # [2B, D]
+        
+            emb = emb_model(torch.concat([out_reordered[:, 0, :], out_reordered[:, 1, :], out_reordered[:, 2, :]], dim=0))  # [3B, D]
             labels = labels_reordered.reshape(-1)
             embeddings.append(emb.cpu())
             lbl.append(labels.cpu())
